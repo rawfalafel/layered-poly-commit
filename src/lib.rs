@@ -9,9 +9,7 @@ use poly_commit::kzg10::{KZG10, Commitment, Powers, UniversalParams};
 use rand_core::RngCore;
 use std::borrow::Cow;
 
-const NUM_DEGREES: usize = 16777216; // 2^24
-
-pub struct Polynomial<E: PairingEngine> {
+struct Polynomial<E: PairingEngine> {
     params: UniversalParams<E>,
     points: Vec<(usize, E::Fr)>,
     commitment: Option<Commitment<E>>,
@@ -21,7 +19,7 @@ pub struct Polynomial<E: PairingEngine> {
 impl <E: PairingEngine> Polynomial<E> {
     pub fn new(params: UniversalParams<E>, points: Vec<(usize, E::Fr)>) -> Polynomial<E> {
         Polynomial {
-            params: params, 
+            params: params,
             points: points,
             commitment: None,
             dirty: false
@@ -43,7 +41,7 @@ impl<E: PairingEngine> PolyHashMap<E> {
         for _ in 0..num_poly {
             let params = KZG10::setup(max_degree, false, rng);
             if params.is_err() {
-                return Err(format!{"{:?}", params.err().unwrap()});
+                return Err(format!{"{:?}", params.unwrap()});
             }
 
             let params = params.ok();
@@ -78,18 +76,18 @@ impl<E: PairingEngine> PolyHashMap<E> {
             hasher.result(&mut digest);
 
             // Convert the digest to `hash(k, i) % n`
-            let output_mod = BigInt::from_bytes_le(Sign::Plus, &digest) % NUM_DEGREES;
+            let output_mod = BigInt::from_bytes_le(Sign::Plus, &digest) % self.num_degrees;
             let poly_x = output_mod.to_usize().unwrap();
 
             reset_digest(&mut digest);
 
             let result = polynomial.points.binary_search_by_key(&poly_x, |&(idx,_)| idx);
-            
+
             // Key not found. Insert key into vector.
             if result.is_err() {
                 let insertion_idx = result.err().unwrap();
 
-                // `output` is the digest for `hash(k, v)` 
+                // `output` is the digest for `hash(k, v)`
                 hasher.reset();
                 hasher.input(key);
                 hasher.input(value);
@@ -112,8 +110,8 @@ impl<E: PairingEngine> PolyHashMap<E> {
 
     // -> update_commitment
     // Update commitment for polynomials since last UpdateCommitment call.
-    pub fn update_commitment(self) -> Result<(), String>{
-        for mut p in self.polynomials {
+    pub fn update_commitment(&mut self) -> Result<(), String> {
+        for p in self.polynomials.iter_mut() {
             if p.points.len() == 0 {
                 break;
             }
@@ -123,28 +121,37 @@ impl<E: PairingEngine> PolyHashMap<E> {
             }
 
             let mut polynomial = vec![E::Fr::zero(); self.num_degrees];
-            for (x, y) in p.points {
-                polynomial[x] = y;
+            for (x, y) in p.points.iter() {
+                polynomial[*x] = *y;
             }
 
             let polynomial = DensePolynomial::from_coefficients_vec(polynomial);
 
             let powers = Powers::<E> {
-                powers_of_g: Cow::Owned(p.params.powers_of_g),
-                powers_of_gamma_g: Cow::Owned(p.params.powers_of_gamma_g)
+                powers_of_g: Cow::Owned(p.params.powers_of_g.to_vec()),
+                powers_of_gamma_g: Cow::Owned(p.params.powers_of_gamma_g.to_vec())
             };
-            
+
             let result = KZG10::commit(&powers, &polynomial, None, None);
             if result.is_err() {
-                return Err(format!("{:?}", result.err().unwrap()));
+                return Err(format!("{:?}", result.err()));
             }
 
-            let commitment: Commitment<E> = result.ok().unwrap().0;
+            let commitment: Commitment<E> = result.unwrap().0;
+
             p.commitment = Some(commitment);
             p.dirty = false;
         }
 
         Ok(())
+    }
+
+    pub fn get_commitment(&self, index: usize) -> Result<Option<Commitment<E>>, String> {
+        if index >= self.polynomials.len() {
+            return Err(String::from("index out of range"));
+        }
+
+        Ok(self.polynomials[index].commitment)
     }
 
     // -> open
@@ -188,7 +195,7 @@ mod tests {
 
     #[test]
     fn test_duplicate() {
-        let mut hashmap = setup(1, 1).ok().unwrap();
+        let mut hashmap = setup(1, 1).unwrap();
 
         let k = [100];
         let v = [100];
@@ -197,6 +204,52 @@ mod tests {
 
         let result = hashmap.insert(&k, &v);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_commitment() {
+        let mut hashmap = setup(100, 3).unwrap();
+
+        assert!(hashmap.polynomials[0].commitment.is_none());
+
+        // Insert initial set of points
+        assert!(hashmap.insert(&[1], &[1]).is_ok());
+        assert!(hashmap.insert(&[2], &[2]).is_ok());
+        assert!(hashmap.insert(&[3], &[3]).is_ok());
+
+        let result = hashmap.update_commitment();
+        assert!(result.is_ok(), result.err().unwrap());
+
+        assert!(hashmap.polynomials[0].commitment.is_some());
+
+        let result = hashmap.get_commitment(0);
+        assert!(result.is_ok());
+
+        let c1 = result.unwrap().unwrap();
+
+        // Add an additional point
+        assert!(hashmap.insert(&[4], &[4]).is_ok());
+
+        let result = hashmap.update_commitment();
+        assert!(result.is_ok(), result.err().unwrap());
+
+        let result = hashmap.get_commitment(0);
+        assert!(result.is_ok());
+
+        let c2 = result.unwrap().unwrap();
+
+        // Assert that a new commitment was grenerated.
+        assert_ne!(c1, c2);
+
+        // Check that the commitment is unchanged when an existing k/v pair is inserted.
+        assert!(hashmap.insert(&[1], &[1]).is_ok());
+
+        let result = hashmap.update_commitment();
+        assert!(result.is_ok(), result.err().unwrap());
+
+        let c3 = hashmap.get_commitment(0).unwrap().unwrap();
+
+        assert_eq!(c2, c3);
     }
 
     #[test]
