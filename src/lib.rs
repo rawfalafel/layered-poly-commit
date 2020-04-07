@@ -5,7 +5,7 @@ use crypto::digest::Digest;
 use ff_fft::polynomial::DensePolynomial;
 use num_bigint::{BigInt,Sign};
 use num_traits::{ToPrimitive,Zero};
-use poly_commit::kzg10::{KZG10, Powers, UniversalParams};
+use poly_commit::kzg10::{KZG10, Commitment, Powers, UniversalParams};
 use rand_core::RngCore;
 use std::borrow::Cow;
 
@@ -13,14 +13,18 @@ const NUM_DEGREES: usize = 16777216; // 2^24
 
 pub struct Polynomial<E: PairingEngine> {
     params: UniversalParams<E>,
-    points: Vec<(usize, E::Fr)>
+    points: Vec<(usize, E::Fr)>,
+    commitment: Option<Commitment<E>>,
+    dirty: bool
 }
 
 impl <E: PairingEngine> Polynomial<E> {
     pub fn new(params: UniversalParams<E>, points: Vec<(usize, E::Fr)>) -> Polynomial<E> {
         Polynomial {
             params: params, 
-            points: points
+            points: points,
+            commitment: None,
+            dirty: false
         }
     }
 }
@@ -29,7 +33,6 @@ pub struct PolyHashMap<E: PairingEngine> {
     polynomials: Vec<Polynomial<E>>,
     num_degrees: usize
 }
-
 
 impl<E: PairingEngine> PolyHashMap<E> {
     // -> setup
@@ -66,7 +69,7 @@ impl<E: PairingEngine> PolyHashMap<E> {
         let mut digest = vec!{0; 32};
 
         // Find the first polynomial in which `hash(k, i)` is empty
-        for i in 0..self.polynomials.len() {
+        for (i, polynomial) in self.polynomials.iter_mut().enumerate() {
 
             // `output` is the digest for `hash(k, i)`
             hasher.reset();
@@ -80,7 +83,7 @@ impl<E: PairingEngine> PolyHashMap<E> {
 
             reset_digest(&mut digest);
 
-            let result = self.polynomials[i].points.binary_search_by_key(&poly_x, |&(idx,_)| idx);
+            let result = polynomial.points.binary_search_by_key(&poly_x, |&(idx,_)| idx);
             
             // Key not found. Insert key into vector.
             if result.is_err() {
@@ -98,7 +101,8 @@ impl<E: PairingEngine> PolyHashMap<E> {
                 reset_digest(&mut digest);
 
                 // See: https://github.com/scipr-lab/zexe/blob/19489db9209cd79e1261370b0b2393b2f1d8c64f/algebra/src/bls12_381/fields/fr.rs#L14
-                self.polynomials[i].points.insert(insertion_idx, (poly_x, poly_y));
+                polynomial.points.insert(insertion_idx, (poly_x, poly_y));
+                polynomial.dirty = true;
                 return Ok(());
             }
         }
@@ -108,10 +112,14 @@ impl<E: PairingEngine> PolyHashMap<E> {
 
     // -> update_commitment
     // Update commitment for polynomials since last UpdateCommitment call.
-    pub fn update_commitment(self) {
-        for p in self.polynomials {
+    pub fn update_commitment(self) -> Result<(), String>{
+        for mut p in self.polynomials {
             if p.points.len() == 0 {
                 break;
+            }
+
+            if !p.dirty {
+                continue;
             }
 
             let mut polynomial = vec![E::Fr::zero(); self.num_degrees];
@@ -119,15 +127,24 @@ impl<E: PairingEngine> PolyHashMap<E> {
                 polynomial[x] = y;
             }
 
-            let densePolynomial = DensePolynomial::from_coefficients_vec(polynomial);
+            let polynomial = DensePolynomial::from_coefficients_vec(polynomial);
 
             let powers = Powers::<E> {
                 powers_of_g: Cow::Owned(p.params.powers_of_g),
                 powers_of_gamma_g: Cow::Owned(p.params.powers_of_gamma_g)
             };
             
-            let result = KZG10::commit(&powers, &densePolynomial, None, None);
+            let result = KZG10::commit(&powers, &polynomial, None, None);
+            if result.is_err() {
+                return Err(format!("{:?}", result.err().unwrap()));
+            }
+
+            let commitment: Commitment<E> = result.ok().unwrap().0;
+            p.commitment = Some(commitment);
+            p.dirty = false;
         }
+
+        Ok(())
     }
 
     // -> open
