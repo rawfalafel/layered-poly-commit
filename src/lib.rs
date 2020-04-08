@@ -59,6 +59,21 @@ impl<E: PairingEngine> PolyHashMap<E> {
         })
     }
 
+    fn bytes_to_usize(&self, value: &[u8]) -> Result<usize, String> {
+        let p = <E::Fr as PrimeField>::from_random_bytes(value);
+
+        if p.is_none() {
+            return Err(String::from("Unable to convert to PrimeField"));
+        }
+
+        let mut p_u32 = [0; 32];
+        p.unwrap().to_bytes(&mut p_u32);
+
+        let p_u32 = BigInt::from_bytes_le(Sign::Plus, &p_u32);
+
+        Ok((p_u32 % self.num_degrees).to_usize().unwrap())
+    }
+
     // `insert` updates the first polynomial for which `hash(k, i) % n` is empty.
     // Inserts `hash(k, v)` as the value.
     pub fn insert(&mut self, key: &[u8], value: &[u8]) -> Result<(), String> {
@@ -154,8 +169,29 @@ impl<E: PairingEngine> PolyHashMap<E> {
         Ok(self.polynomials[index].commitment)
     }
 
+    pub fn get_powers(&self, index: usize) -> Result<Powers<E>, String> {
+        if index >= self.polynomials.len() {
+            return Err(String::from("index out of range"));
+        }
+
+        let p = &self.polynomials[index];
+        Ok(Powers::<E> {
+            powers_of_g: Cow::Owned(p.params.powers_of_g.to_vec()),
+            powers_of_gamma_g: Cow::Owned(p.params.powers_of_gamma_g.to_vec())
+        })
+    }
+
     // -> open
     // Generate a witness for a given set of key/value pairs.
+    pub fn open(&self, p: E::Fr) -> Result<(), String> {
+        // `p` shoud be received as `E::Fr`. The point doesn't have to correspond to [0, n)
+
+        // Iterate over polynomials. Find polynomial for which p exists.
+
+        // Call KZG10::open
+
+        Ok(())
+    }
 
     // -> verify
     // Verify that a given witness is valid.
@@ -172,10 +208,13 @@ mod tests {
     use super::PolyHashMap;
 
     use algebra::Bls12_381;
+    use algebra_core::curves::PairingEngine;
+    use algebra_core::fields::PrimeField;
     use crypto::sha3::Sha3;
     use crypto::digest::Digest;
     use rand_core::SeedableRng;
     use rand_pcg::Pcg32;
+    use num_bigint::{BigInt,Sign};
 
     type PolyHashMapBls12_381 = PolyHashMap<Bls12_381>;
 
@@ -204,6 +243,45 @@ mod tests {
 
         let result = hashmap.insert(&k, &v);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_modulus() {
+        let mut hasher = Sha3::sha3_256();
+        let mut digest = vec!{0; 32};
+
+        hasher.input(&[19, 19]);
+        hasher.result(&mut digest);
+
+        let num_bi = BigInt::from_bytes_le(Sign::Plus, &digest);
+        let num_field = <<Bls12_381 as PairingEngine>::Fr as PrimeField>::from_random_bytes(&digest).unwrap();
+
+        println!("num_bi: {:?}", num_bi);
+        println!("num_field: {:?}", num_field);
+
+        let num_u64: [u64; 4] = (num_field.0).0;
+        println!("num_u64: {:?}", num_u64);
+
+        let mut num_u32 = vec!{};
+        for n in &num_u64 {
+            num_u32.push((0xffffffff & n) as u32);
+            num_u32.push((n >> 32) as u32);
+        }
+
+        println!("num_u32: {:?}", num_u32);
+    }
+
+    #[test]
+    fn test_bytes_to_point() {
+        let input = [0xf; 32];
+
+        let hashmap = setup(100, 3).unwrap();
+
+        let result = hashmap.bytes_to_usize(&input);
+        assert!(result.is_ok());
+
+        let point = result.unwrap();
+        assert!(point < 100);
     }
 
     #[test]
