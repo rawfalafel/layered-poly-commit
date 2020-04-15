@@ -1,11 +1,13 @@
-use algebra_core::{PairingEngine};
-use algebra::PrimeField;
+use algebra_core::PairingEngine;
+use algebra_core::bytes::ToBytes;
+use algebra::{Field};
 use crypto::sha3::Sha3;
 use crypto::digest::Digest;
 use ff_fft::polynomial::DensePolynomial;
 use num_bigint::{BigInt,Sign};
 use num_traits::{ToPrimitive,Zero};
-use poly_commit::kzg10::{KZG10, Commitment, Powers, UniversalParams};
+use poly_commit::PCRandomness;
+use poly_commit::kzg10::{KZG10, Randomness, Commitment, Proof, Powers, UniversalParams};
 use rand_core::RngCore;
 use std::borrow::Cow;
 
@@ -59,19 +61,41 @@ impl<E: PairingEngine> PolyHashMap<E> {
         })
     }
 
-    fn bytes_to_usize(&self, value: &[u8]) -> Result<usize, String> {
-        let p = <E::Fr as PrimeField>::from_random_bytes(value);
+    fn bytes_to_mod_degrees(&self, value: &[u8]) -> Result<BigInt, String> {
+        // Note: `from_random_bytes` multiplies the integer representation of the raw bytes by `Fr::R`
+        let p = <E::Fr as Field>::from_random_bytes(value);
 
         if p.is_none() {
             return Err(String::from("Unable to convert to PrimeField"));
         }
 
-        let mut p_u32 = [0; 32];
-        p.unwrap().to_bytes(&mut p_u32);
+        let mut p_u32 = vec!{0; 32};
+        let result = p.unwrap().write(&mut p_u32);
+        if result.is_err() {
+            return Err(String::from("Failed to convert field to bytes"));
+        }
 
         let p_u32 = BigInt::from_bytes_le(Sign::Plus, &p_u32);
 
-        Ok((p_u32 % self.num_degrees).to_usize().unwrap())
+        Ok(p_u32 % self.num_degrees)
+    }
+
+    fn bytes_to_usize(&self, value: &[u8]) -> Result<usize, String> {
+        let bi = self.bytes_to_mod_degrees(value)?;
+        Ok(bi.to_usize().unwrap())
+    }
+
+    fn bytes_to_fr(&self, value: &[u8]) -> Result<E::Fr, String> {
+        let bi = self.bytes_to_mod_degrees(value)?;
+
+        let bi_bytes = bi.to_bytes_le().1;
+        let p = <E::Fr as Field>::from_random_bytes(&bi_bytes);
+
+        if p.is_none() {
+            return Err(String::from("Unable to convert to PrimeField"));
+        }
+
+        Ok(p.unwrap())
     }
 
     // `insert` updates the first polynomial for which `hash(k, i) % n` is empty.
@@ -109,7 +133,7 @@ impl<E: PairingEngine> PolyHashMap<E> {
                 hasher.result(&mut digest);
 
                 // TODO: Check if conversion to E::Fr truncates numbers.
-                let poly_y = E::Fr::from_random_bytes(&digest).unwrap();
+                let poly_y = <E::Fr as Field>::from_random_bytes(&digest).unwrap();
 
                 reset_digest(&mut digest);
 
@@ -126,7 +150,9 @@ impl<E: PairingEngine> PolyHashMap<E> {
     // -> update_commitment
     // Update commitment for polynomials since last UpdateCommitment call.
     pub fn update_commitment(&mut self) -> Result<(), String> {
-        for p in self.polynomials.iter_mut() {
+        let mut updates = vec!{};
+
+        for (i, p) in self.polynomials.iter().enumerate() {
             if p.points.len() == 0 {
                 break;
             }
@@ -135,17 +161,8 @@ impl<E: PairingEngine> PolyHashMap<E> {
                 continue;
             }
 
-            let mut polynomial = vec![E::Fr::zero(); self.num_degrees];
-            for (x, y) in p.points.iter() {
-                polynomial[*x] = *y;
-            }
-
-            let polynomial = DensePolynomial::from_coefficients_vec(polynomial);
-
-            let powers = Powers::<E> {
-                powers_of_g: Cow::Owned(p.params.powers_of_g.to_vec()),
-                powers_of_gamma_g: Cow::Owned(p.params.powers_of_gamma_g.to_vec())
-            };
+            let polynomial = self.construct_dense_polynomial(i)?;
+            let powers = self.get_powers(i)?;
 
             let result = KZG10::commit(&powers, &polynomial, None, None);
             if result.is_err() {
@@ -153,12 +170,28 @@ impl<E: PairingEngine> PolyHashMap<E> {
             }
 
             let commitment: Commitment<E> = result.unwrap().0;
+            updates.push((i, Some(commitment)));
+        }
 
-            p.commitment = Some(commitment);
-            p.dirty = false;
+        for (i, commitment) in updates {
+            self.polynomials[i].commitment = commitment;
+            self.polynomials[i].dirty = false;
         }
 
         Ok(())
+    }
+
+    fn construct_dense_polynomial(&self, index: usize) -> Result<DensePolynomial<E::Fr>, String> {
+        if index >= self.polynomials.len() {
+            return Err(String::from("index out of range"));
+        }
+
+        let mut polynomial = vec![E::Fr::zero(); self.num_degrees];
+        for (x, y) in self.polynomials[index].points.iter() {
+            polynomial[*x] = *y;
+        }
+
+        Ok(DensePolynomial::from_coefficients_vec(polynomial))
     }
 
     pub fn get_commitment(&self, index: usize) -> Result<Option<Commitment<E>>, String> {
@@ -182,15 +215,39 @@ impl<E: PairingEngine> PolyHashMap<E> {
     }
 
     // -> open
-    // Generate a witness for a given set of key/value pairs.
-    pub fn open(&self, p: E::Fr) -> Result<(), String> {
-        // `p` shoud be received as `E::Fr`. The point doesn't have to correspond to [0, n)
-
+    // Generate a witness for a given key
+    pub fn open(&self, k: &[u8]) -> Result<Proof<E>, String> {
         // Iterate over polynomials. Find polynomial for which p exists.
+        let mut hasher = Sha3::sha3_256();
+        let mut digest = [0; 32];
 
-        // Call KZG10::open
+        for (i, polynomial) in self.polynomials.iter().enumerate() {
+            hasher.input(k);
+            hasher.input(&[i as u8]);
+            hasher.result(&mut digest);
 
-        Ok(())
+            reset_digest(&mut digest);
+
+            let point = self.bytes_to_usize(&digest)?;
+            let result = polynomial.points.binary_search_by_key(&point, |&(idx,_)| idx);
+            if result.is_err() {
+                continue;
+            }
+
+            let powers = self.get_powers(i)?;
+            let polynomial = self.construct_dense_polynomial(i)?;
+            let point = self.bytes_to_fr(&digest)?;
+            let rand = Randomness::<E>::empty();
+
+            let result = KZG10::open(&powers, &polynomial, point, &rand);
+            if result.is_err() {
+                return Err(String::from(format!("{:?}", result.err())));
+            }
+
+            return Ok(result.unwrap());
+        }
+
+        Err(String::from("Key not found"))
     }
 
     // -> verify
@@ -209,7 +266,7 @@ mod tests {
 
     use algebra::Bls12_381;
     use algebra_core::curves::PairingEngine;
-    use algebra_core::fields::PrimeField;
+    use algebra_core::fields::Field;
     use crypto::sha3::Sha3;
     use crypto::digest::Digest;
     use rand_core::SeedableRng;
@@ -254,7 +311,7 @@ mod tests {
         hasher.result(&mut digest);
 
         let num_bi = BigInt::from_bytes_le(Sign::Plus, &digest);
-        let num_field = <<Bls12_381 as PairingEngine>::Fr as PrimeField>::from_random_bytes(&digest).unwrap();
+        let num_field = <<Bls12_381 as PairingEngine>::Fr as Field>::from_random_bytes(&digest).unwrap();
 
         println!("num_bi: {:?}", num_bi);
         println!("num_field: {:?}", num_field);
