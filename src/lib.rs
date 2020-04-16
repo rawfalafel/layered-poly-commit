@@ -1,6 +1,8 @@
+#![feature(try_trait)]
+
+use algebra::Field;
 use algebra_core::PairingEngine;
 use algebra_core::bytes::ToBytes;
-use algebra::{Field};
 use crypto::sha3::Sha3;
 use crypto::digest::Digest;
 use ff_fft::polynomial::DensePolynomial;
@@ -10,19 +12,20 @@ use poly_commit::PCRandomness;
 use poly_commit::kzg10::{KZG10, Randomness, Commitment, Proof, Powers, UniversalParams};
 use rand_core::RngCore;
 use std::borrow::Cow;
+use std::error::Error as StdError;
 
 struct Polynomial<E: PairingEngine> {
     params: UniversalParams<E>,
-    points: Vec<(usize, E::Fr)>,
+    evaluations: Vec<(usize, E::Fr)>,
     commitment: Option<Commitment<E>>,
     dirty: bool
 }
 
 impl <E: PairingEngine> Polynomial<E> {
-    pub fn new(params: UniversalParams<E>, points: Vec<(usize, E::Fr)>) -> Polynomial<E> {
+    pub fn new(params: UniversalParams<E>, evaluations: Vec<(usize, E::Fr)>) -> Polynomial<E> {
         Polynomial {
             params: params,
-            points: points,
+            evaluations: evaluations,
             commitment: None,
             dirty: false
         }
@@ -34,26 +37,31 @@ pub struct PolyHashMap<E: PairingEngine> {
     num_degrees: usize
 }
 
+#[derive(Debug)]
+pub enum Error {
+    SetupFailed {
+        label: String
+    },
+
+    Default {
+        label: String
+    }
+}
+
+impl<E: StdError> From<E> for Error {
+    fn from(e: E) -> Error {
+        Error::Default { label: String::from("Blah") }
+    }
+}
+
 impl<E: PairingEngine> PolyHashMap<E> {
     // -> setup
     // Generate a vector of polynomials of degree n.
-    pub fn setup<R: RngCore>(max_degree: usize, num_poly: usize, rng: &mut R) -> Result<PolyHashMap<E>, String> {
-        let mut polynomials = vec!{};
-
-        for _ in 0..num_poly {
-            let params = KZG10::setup(max_degree, false, rng);
-            if params.is_err() {
-                return Err(format!{"{:?}", params.unwrap()});
-            }
-
-            let params = params.ok();
-            if params.is_none() {
-                return Err(String::from("Setup failed to generate parameters"));
-            }
-
-            let polynomial = Polynomial::new(params.unwrap(), vec!{});
-            polynomials.push(polynomial);
-        }
+    pub fn setup<R: RngCore>(max_degree: usize, num_poly: usize, rng: &mut R) -> Result<PolyHashMap<E>, Error> {
+        let polynomials = (0..num_poly).map(|_| {
+            let params = KZG10::setup(max_degree, false, rng)?;
+            Ok(Polynomial::new(params, vec!{}))
+        }).collect::<Result<Vec<Polynomial<E>>, Error>>()?;
 
         Ok(PolyHashMap{
             polynomials: polynomials,
@@ -61,46 +69,33 @@ impl<E: PairingEngine> PolyHashMap<E> {
         })
     }
 
-    fn bytes_to_mod_degrees(&self, value: &[u8]) -> Result<BigInt, String> {
+    fn bytes_to_mod_degrees(&self, value: &[u8]) -> Result<BigInt, Error> {
         // Note: `from_random_bytes` multiplies the integer representation of the raw bytes by `Fr::R`
-        let p = <E::Fr as Field>::from_random_bytes(value);
-
-        if p.is_none() {
-            return Err(String::from("Unable to convert to PrimeField"));
-        }
+        let p = <E::Fr>::from_random_bytes(value).ok_or(Error::Default { label: String::from("Blah") })?;
 
         let mut p_u32 = vec!{0; 32};
-        let result = p.unwrap().write(&mut p_u32);
-        if result.is_err() {
-            return Err(String::from("Failed to convert field to bytes"));
-        }
+        let result = p.write(&mut p_u32)?;
 
         let p_u32 = BigInt::from_bytes_le(Sign::Plus, &p_u32);
 
         Ok(p_u32 % self.num_degrees)
     }
 
-    fn bytes_to_usize(&self, value: &[u8]) -> Result<usize, String> {
+    fn bytes_to_usize(&self, value: &[u8]) -> Result<usize, Error> {
         let bi = self.bytes_to_mod_degrees(value)?;
-        Ok(bi.to_usize().unwrap())
+        bi.to_usize().ok_or(Error::Default { label: String::from("Blah") })
     }
 
-    fn bytes_to_fr(&self, value: &[u8]) -> Result<E::Fr, String> {
+    fn bytes_to_fr(&self, value: &[u8]) -> Result<E::Fr, Error> {
         let bi = self.bytes_to_mod_degrees(value)?;
 
         let bi_bytes = bi.to_bytes_le().1;
-        let p = <E::Fr as Field>::from_random_bytes(&bi_bytes);
-
-        if p.is_none() {
-            return Err(String::from("Unable to convert to PrimeField"));
-        }
-
-        Ok(p.unwrap())
+        <E::Fr>::from_random_bytes(&bi_bytes).ok_or(Error::Default { label: String::from("Blah") })
     }
 
     // `insert` updates the first polynomial for which `hash(k, i) % n` is empty.
     // Inserts `hash(k, v)` as the value.
-    pub fn insert(&mut self, key: &[u8], value: &[u8]) -> Result<(), String> {
+    pub fn insert(&mut self, key: &[u8], value: &[u8]) -> Result<(), Error> {
         // TODO: Test if a single hasher should be instantiated for a single PolyHashMap instance.
         let mut hasher = Sha3::sha3_256();
         let mut digest = vec!{0; 32};
@@ -120,7 +115,7 @@ impl<E: PairingEngine> PolyHashMap<E> {
 
             reset_digest(&mut digest);
 
-            let result = polynomial.points.binary_search_by_key(&poly_x, |&(idx,_)| idx);
+            let result = polynomial.evaluations.binary_search_by_key(&poly_x, |&(idx,_)| idx);
 
             // Key not found. Insert key into vector.
             if result.is_err() {
@@ -133,27 +128,27 @@ impl<E: PairingEngine> PolyHashMap<E> {
                 hasher.result(&mut digest);
 
                 // TODO: Check if conversion to E::Fr truncates numbers.
-                let poly_y = <E::Fr as Field>::from_random_bytes(&digest).unwrap();
+                let poly_y = <E::Fr>::from_random_bytes(&digest).unwrap();
 
                 reset_digest(&mut digest);
 
                 // See: https://github.com/scipr-lab/zexe/blob/19489db9209cd79e1261370b0b2393b2f1d8c64f/algebra/src/bls12_381/fields/fr.rs#L14
-                polynomial.points.insert(insertion_idx, (poly_x, poly_y));
+                polynomial.evaluations.insert(insertion_idx, (poly_x, poly_y));
                 polynomial.dirty = true;
                 return Ok(());
             }
         }
 
-        return Err(String::from("Failed to find an empty polynomial."));
+        Err(Error::Default { label: String::from("Failed to find an empty polynomial.") })
     }
 
     // -> update_commitment
     // Update commitment for polynomials since last UpdateCommitment call.
-    pub fn update_commitment(&mut self) -> Result<(), String> {
+    pub fn update_commitment(&mut self) -> Result<(), Error> {
         let mut updates = vec!{};
 
         for (i, p) in self.polynomials.iter().enumerate() {
-            if p.points.len() == 0 {
+            if p.evaluations.len() == 0 {
                 break;
             }
 
@@ -164,12 +159,9 @@ impl<E: PairingEngine> PolyHashMap<E> {
             let polynomial = self.construct_dense_polynomial(i)?;
             let powers = self.get_powers(i)?;
 
-            let result = KZG10::commit(&powers, &polynomial, None, None);
-            if result.is_err() {
-                return Err(format!("{:?}", result.err()));
-            }
+            let result = KZG10::commit(&powers, &polynomial, None, None)?;
 
-            let commitment: Commitment<E> = result.unwrap().0;
+            let commitment: Commitment<E> = result.0;
             updates.push((i, Some(commitment)));
         }
 
@@ -181,30 +173,30 @@ impl<E: PairingEngine> PolyHashMap<E> {
         Ok(())
     }
 
-    fn construct_dense_polynomial(&self, index: usize) -> Result<DensePolynomial<E::Fr>, String> {
+    fn construct_dense_polynomial(&self, index: usize) -> Result<DensePolynomial<E::Fr>, Error> {
         if index >= self.polynomials.len() {
-            return Err(String::from("index out of range"));
+            return Err(Error::Default { label: String::from("index out of range") });
         }
 
         let mut polynomial = vec![E::Fr::zero(); self.num_degrees];
-        for (x, y) in self.polynomials[index].points.iter() {
+        for (x, y) in self.polynomials[index].evaluations.iter() {
             polynomial[*x] = *y;
         }
 
         Ok(DensePolynomial::from_coefficients_vec(polynomial))
     }
 
-    pub fn get_commitment(&self, index: usize) -> Result<Option<Commitment<E>>, String> {
+    pub fn get_commitment(&self, index: usize) -> Result<Option<Commitment<E>>, Error> {
         if index >= self.polynomials.len() {
-            return Err(String::from("index out of range"));
+            return Err(Error::Default { label: String::from("index out of range") })
         }
 
         Ok(self.polynomials[index].commitment)
     }
 
-    pub fn get_powers(&self, index: usize) -> Result<Powers<E>, String> {
+    pub fn get_powers(&self, index: usize) -> Result<Powers<E>, Error> {
         if index >= self.polynomials.len() {
-            return Err(String::from("index out of range"));
+            return Err(Error::Default { label: String::from("index out of range") })
         }
 
         let p = &self.polynomials[index];
@@ -216,7 +208,7 @@ impl<E: PairingEngine> PolyHashMap<E> {
 
     // -> open
     // Generate a witness for a given key
-    pub fn open(&self, k: &[u8]) -> Result<Proof<E>, String> {
+    pub fn open(&self, k: &[u8]) -> Result<Proof<E>, Error> {
         // Iterate over polynomials. Find polynomial for which p exists.
         let mut hasher = Sha3::sha3_256();
         let mut digest = [0; 32];
@@ -229,7 +221,7 @@ impl<E: PairingEngine> PolyHashMap<E> {
             reset_digest(&mut digest);
 
             let point = self.bytes_to_usize(&digest)?;
-            let result = polynomial.points.binary_search_by_key(&point, |&(idx,_)| idx);
+            let result = polynomial.evaluations.binary_search_by_key(&point, |&(idx,_)| idx);
             if result.is_err() {
                 continue;
             }
@@ -239,15 +231,10 @@ impl<E: PairingEngine> PolyHashMap<E> {
             let point = self.bytes_to_fr(&digest)?;
             let rand = Randomness::<E>::empty();
 
-            let result = KZG10::open(&powers, &polynomial, point, &rand);
-            if result.is_err() {
-                return Err(String::from(format!("{:?}", result.err())));
-            }
-
-            return Ok(result.unwrap());
+            return Ok(KZG10::open(&powers, &polynomial, point, &rand)?);
         }
 
-        Err(String::from("Key not found"))
+        Err(Error::Default { label: String::from("Key not found") })
     }
 
     // -> verify
@@ -262,7 +249,7 @@ fn reset_digest(digest: &mut [u8]) {
 
 #[cfg(test)]
 mod tests {
-    use super::PolyHashMap;
+    use super::{PolyHashMap,Error};
 
     use algebra::Bls12_381;
     use algebra_core::curves::PairingEngine;
@@ -275,7 +262,7 @@ mod tests {
 
     type PolyHashMapBls12_381 = PolyHashMap<Bls12_381>;
 
-    fn setup(max_degree: usize, num_poly: usize) -> Result<PolyHashMapBls12_381, String> {
+    fn setup(max_degree: usize, num_poly: usize) -> Result<PolyHashMapBls12_381, Error> {
         let seed = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15];
         let mut rng = Pcg32::from_seed(seed);
         PolyHashMapBls12_381::setup(max_degree, num_poly, &mut rng)
