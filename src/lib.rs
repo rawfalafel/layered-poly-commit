@@ -14,6 +14,7 @@ use rand_core::RngCore;
 use std::borrow::Cow;
 use std::error::Error as StdError;
 
+#[derive(Debug)]
 struct Polynomial<E: PairingEngine> {
     params: UniversalParams<E>,
     evaluations: Vec<(usize, E::Fr)>,
@@ -32,6 +33,7 @@ impl <E: PairingEngine> Polynomial<E> {
     }
 }
 
+#[derive(Debug)]
 pub struct PolyHashMap<E: PairingEngine> {
     polynomials: Vec<Polynomial<E>>,
     num_degrees: usize
@@ -39,10 +41,6 @@ pub struct PolyHashMap<E: PairingEngine> {
 
 #[derive(Debug)]
 pub enum Error {
-    SetupFailed {
-        label: String
-    },
-
     Default {
         label: String
     }
@@ -50,7 +48,7 @@ pub enum Error {
 
 impl<E: StdError> From<E> for Error {
     fn from(e: E) -> Error {
-        Error::Default { label: String::from("Blah") }
+        Error::Default { label: format!("{:?}", e) }
     }
 }
 
@@ -74,7 +72,7 @@ impl<E: PairingEngine> PolyHashMap<E> {
         let p = <E::Fr>::from_random_bytes(value).ok_or(Error::Default { label: String::from("Blah") })?;
 
         let mut p_u32 = vec!{0; 32};
-        let result = p.write(&mut p_u32)?;
+        p.write(&mut p_u32)?;
 
         let p_u32 = BigInt::from_bytes_le(Sign::Plus, &p_u32);
 
@@ -186,12 +184,16 @@ impl<E: PairingEngine> PolyHashMap<E> {
         Ok(DensePolynomial::from_coefficients_vec(polynomial))
     }
 
-    pub fn get_commitment(&self, index: usize) -> Result<Option<Commitment<E>>, Error> {
+    pub fn get_commitment(&self, index: usize) -> Result<Commitment<E>, Error> {
         if index >= self.polynomials.len() {
             return Err(Error::Default { label: String::from("index out of range") })
         }
 
-        Ok(self.polynomials[index].commitment)
+        if self.polynomials[index].commitment.is_none() {
+            return Err(Error::Default { label: String::from("commitment does not exist") })
+        }
+
+        Ok(self.polynomials[index].commitment.unwrap())
     }
 
     pub fn get_powers(&self, index: usize) -> Result<Powers<E>, Error> {
@@ -272,8 +274,7 @@ mod tests {
     fn test_setup() {
         let result = setup(5, 5);
 
-        assert!(result.is_ok());
-        assert!(result.ok().is_some());
+        assert!(result.is_ok(), result.unwrap_err());
     }
 
     #[test]
@@ -283,10 +284,10 @@ mod tests {
         let k = [100];
         let v = [100];
         let result = hashmap.insert(&k, &v);
-        assert!(result.is_ok());
+        assert!(result.is_ok(), result.unwrap_err());
 
         let result = hashmap.insert(&k, &v);
-        assert!(result.is_err());
+        assert!(result.is_err(), result.unwrap());
     }
 
     #[test]
@@ -340,25 +341,25 @@ mod tests {
         assert!(hashmap.insert(&[3], &[3]).is_ok());
 
         let result = hashmap.update_commitment();
-        assert!(result.is_ok(), result.err().unwrap());
+        assert!(result.is_ok(), result.unwrap_err());
 
         assert!(hashmap.polynomials[0].commitment.is_some());
 
         let result = hashmap.get_commitment(0);
         assert!(result.is_ok());
 
-        let c1 = result.unwrap().unwrap();
+        let c1 = result.unwrap();
 
         // Add an additional point
         assert!(hashmap.insert(&[4], &[4]).is_ok());
 
         let result = hashmap.update_commitment();
-        assert!(result.is_ok(), result.err().unwrap());
+        assert!(result.is_ok(), result.unwrap_err());
 
         let result = hashmap.get_commitment(0);
         assert!(result.is_ok());
 
-        let c2 = result.unwrap().unwrap();
+        let c2 = result.unwrap();
 
         // Assert that a new commitment was grenerated.
         assert_ne!(c1, c2);
@@ -367,9 +368,9 @@ mod tests {
         assert!(hashmap.insert(&[1], &[1]).is_ok());
 
         let result = hashmap.update_commitment();
-        assert!(result.is_ok(), result.err().unwrap());
+        assert!(result.is_ok(), result.unwrap_err());
 
-        let c3 = hashmap.get_commitment(0).unwrap().unwrap();
+        let c3 = hashmap.get_commitment(0).unwrap();
 
         assert_eq!(c2, c3);
     }
