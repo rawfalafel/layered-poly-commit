@@ -10,9 +10,11 @@ use num_bigint::{BigInt,Sign};
 use num_traits::{ToPrimitive,Zero};
 use poly_commit::PCRandomness;
 use poly_commit::kzg10::{KZG10, Randomness, Commitment, Proof, Powers, UniversalParams};
+use poly_commit::error::Error as PolyCommitError;
 use rand_core::RngCore;
 use std::borrow::Cow;
-use std::error::Error as StdError;
+use std::io::Error as IOError;
+use std::option::NoneError;
 
 #[derive(Debug)]
 struct Polynomial<E: PairingEngine> {
@@ -41,14 +43,27 @@ pub struct PolyHashMap<E: PairingEngine> {
 
 #[derive(Debug)]
 pub enum Error {
-    Default {
-        label: String
+    PolyCommitError(PolyCommitError),
+    IOError(IOError),
+    NoneError(NoneError),
+    Default(String)
+}
+
+impl From<NoneError> for Error {
+    fn from(e: NoneError) -> Error {
+        Error::NoneError(e)
     }
 }
 
-impl<E: StdError> From<E> for Error {
-    fn from(e: E) -> Error {
-        Error::Default { label: format!("{:?}", e) }
+impl From<IOError> for Error {
+    fn from(e: IOError) -> Error {
+        Error::IOError(e)
+    }
+}
+
+impl From<PolyCommitError> for Error {
+    fn from(e: PolyCommitError) -> Error {
+        Error::PolyCommitError(e)
     }
 }
 
@@ -69,7 +84,7 @@ impl<E: PairingEngine> PolyHashMap<E> {
 
     fn bytes_to_mod_degrees(&self, value: &[u8]) -> Result<BigInt, Error> {
         // Note: `from_random_bytes` multiplies the integer representation of the raw bytes by `Fr::R`
-        let p = <E::Fr>::from_random_bytes(value).ok_or(Error::Default { label: String::from("Blah") })?;
+        let p = <E::Fr>::from_random_bytes(value)?;
 
         let mut p_u32 = vec!{0; 32};
         p.write(&mut p_u32)?;
@@ -80,15 +95,16 @@ impl<E: PairingEngine> PolyHashMap<E> {
     }
 
     fn bytes_to_usize(&self, value: &[u8]) -> Result<usize, Error> {
-        let bi = self.bytes_to_mod_degrees(value)?;
-        bi.to_usize().ok_or(Error::Default { label: String::from("Blah") })
+        let bytes_usize = self.bytes_to_mod_degrees(value)?.to_usize()?;
+        Ok(bytes_usize)
     }
 
     fn bytes_to_fr(&self, value: &[u8]) -> Result<E::Fr, Error> {
         let bi = self.bytes_to_mod_degrees(value)?;
 
         let bi_bytes = bi.to_bytes_le().1;
-        <E::Fr>::from_random_bytes(&bi_bytes).ok_or(Error::Default { label: String::from("Blah") })
+        let field = <E::Fr>::from_random_bytes(&bi_bytes)?;
+        Ok(field)
     }
 
     // `insert` updates the first polynomial for which `hash(k, i) % n` is empty.
@@ -137,7 +153,7 @@ impl<E: PairingEngine> PolyHashMap<E> {
             }
         }
 
-        Err(Error::Default { label: String::from("Failed to find an empty polynomial.") })
+        Err(Error::Default(String::from("Failed to find an empty polynomial.")))
     }
 
     // -> update_commitment
@@ -173,7 +189,7 @@ impl<E: PairingEngine> PolyHashMap<E> {
 
     fn construct_dense_polynomial(&self, index: usize) -> Result<DensePolynomial<E::Fr>, Error> {
         if index >= self.polynomials.len() {
-            return Err(Error::Default { label: String::from("index out of range") });
+            return Err(Error::Default(String::from("Index out of range")));
         }
 
         let mut polynomial = vec![E::Fr::zero(); self.num_degrees];
@@ -186,11 +202,11 @@ impl<E: PairingEngine> PolyHashMap<E> {
 
     pub fn get_commitment(&self, index: usize) -> Result<Commitment<E>, Error> {
         if index >= self.polynomials.len() {
-            return Err(Error::Default { label: String::from("index out of range") })
+            return Err(Error::Default(String::from("Index out of range")))
         }
 
         if self.polynomials[index].commitment.is_none() {
-            return Err(Error::Default { label: String::from("commitment does not exist") })
+            return Err(Error::Default(String::from("Commitment does not exist")))
         }
 
         Ok(self.polynomials[index].commitment.unwrap())
@@ -198,7 +214,7 @@ impl<E: PairingEngine> PolyHashMap<E> {
 
     pub fn get_powers(&self, index: usize) -> Result<Powers<E>, Error> {
         if index >= self.polynomials.len() {
-            return Err(Error::Default { label: String::from("index out of range") })
+            return Err(Error::Default(String::from("Index out of range")))
         }
 
         let p = &self.polynomials[index];
@@ -236,7 +252,7 @@ impl<E: PairingEngine> PolyHashMap<E> {
             return Ok(KZG10::open(&powers, &polynomial, point, &rand)?);
         }
 
-        Err(Error::Default { label: String::from("Key not found") })
+        Err(Error::Default(String::from("Key not found")))
     }
 
     // -> verify
