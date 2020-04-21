@@ -114,51 +114,6 @@ impl<E: PairingEngine> PolyHashMap<E> {
         })
     }
 
-    // TODO: Avoid [u8] -> E::Fr -> BigInt conversions
-    fn bytes_to_modulus(value: &[u8], modulus: usize) -> Result<BigInt, Error> {
-        // Note: `from_random_bytes` multiplies the integer representation of the raw bytes by `Fr::R2`
-        let p = <E::Fr>::from_random_bytes(value)?;
-
-        // Note: This needs to be an empty vector to behave correctly.
-        let mut p_u32 = vec!{};
-        p.write(&mut p_u32)?;
-
-        let p_u32 = BigInt::from_bytes_le(Sign::Plus, &p_u32);
-
-        Ok(p_u32 % modulus)
-    }
-
-    fn bytes_to_usize(value: &[u8], modulus: usize) -> Result<usize, Error> {
-        let bytes_usize = Self::bytes_to_modulus(value, modulus)?.to_usize()?;
-        Ok(bytes_usize)
-    }
-
-    fn point_to_root_of_unity(root_of_unity: E::Fr, point: usize) -> E::Fr {
-        root_of_unity.pow(&[point as u64])
-    }
-
-    fn get_map_key(key: &[u8], index: u8, modulus: usize) -> Result<usize, Error> {
-        let mut hasher = Sha3::sha3_256();
-        let mut digest = vec!{0; 32};
-
-        hasher.input(key);
-        hasher.input(&[index]);
-        hasher.result(&mut digest);
-
-        Ok(Self::bytes_to_usize(&digest, modulus)?)
-    }
-
-    fn get_map_value(key: &[u8], value: &[u8]) -> Result<E::Fr, Error> {
-        let mut hasher = Sha3::sha3_256();
-        let mut digest = vec!{0; 32};
-
-        hasher.input(key);
-        hasher.input(value);
-        hasher.result(&mut digest);
-
-        Ok(<E::Fr>::from_random_bytes(&digest)?)
-    }
-
     // `insert` updates the first polynomial for which `hash(k, i) % n` is empty.
     // Inserts `hash(k, v)` as the value.
     pub fn insert(&mut self, key: &[u8], value: &[u8]) -> Result<(), Error> {
@@ -211,43 +166,6 @@ impl<E: PairingEngine> PolyHashMap<E> {
         }
 
         Ok(())
-    }
-
-    fn construct_dense_polynomial(&self, index: usize) -> Result<DensePolynomial<E::Fr>, Error> {
-        if index >= self.polynomials.len() {
-            return Err(Error::Default(String::from("Index out of range")));
-        }
-
-        // TODO: Experiment with `interpolate` over `inerpolate_by_ref`
-        Ok(self.polynomials[index].evaluations.interpolate_by_ref())
-    }
-
-    pub fn get_commitment(&self, index: usize) -> Result<Commitment<E>, Error> {
-        if index >= self.polynomials.len() {
-            return Err(Error::Default(String::from("Index out of range")))
-        }
-
-        if self.polynomials[index].commitment.is_none() {
-            return Err(Error::Default(String::from("Commitment does not exist")))
-        }
-
-        Ok(self.polynomials[index].commitment.unwrap())
-    }
-
-    fn get_coefficients(&self, index: usize) -> Result<&DensePolynomial<E::Fr>, Error> {
-        Ok(self.polynomials[index].coefficients.as_ref()?)
-    }
-
-    pub fn get_powers(&self, index: usize) -> Result<Powers<E>, Error> {
-        if index >= self.polynomials.len() {
-            return Err(Error::Default(String::from("Index out of range")))
-        }
-
-        let p = &self.polynomials[index];
-        Ok(Powers::<E> {
-            powers_of_g: Cow::Owned(p.params.powers_of_g.to_vec()),
-            powers_of_gamma_g: Cow::Owned(p.params.powers_of_gamma_g.to_vec())
-        })
     }
 
     // -> open
@@ -309,6 +227,76 @@ impl<E: PairingEngine> PolyHashMap<E> {
         }
 
         Err(Error::Default(String::from("Key not found")))
+    }
+
+    // TODO: Avoid [u8] -> E::Fr -> BigInt conversions
+    fn bytes_to_modulus(value: &[u8], modulus: usize) -> Result<BigInt, Error> {
+        // Note: `from_random_bytes` multiplies the integer representation of the raw bytes by `Fr::R2`
+        let p = <E::Fr>::from_random_bytes(value)?;
+
+        // Note: This needs to be an empty vector to behave correctly.
+        let mut p_u32 = vec!{};
+        p.write(&mut p_u32)?;
+
+        let p_u32 = BigInt::from_bytes_le(Sign::Plus, &p_u32);
+
+        Ok(p_u32 % modulus)
+    }
+
+    fn bytes_to_usize(value: &[u8], modulus: usize) -> Result<usize, Error> {
+        let bytes_usize = Self::bytes_to_modulus(value, modulus)?.to_usize()?;
+        Ok(bytes_usize)
+    }
+
+    fn point_to_root_of_unity(root_of_unity: E::Fr, point: usize) -> E::Fr {
+        root_of_unity.pow(&[point as u64])
+    }
+
+    fn get_map_key(key: &[u8], index: u8, modulus: usize) -> Result<usize, Error> {
+        let mut hasher = Sha3::sha3_256();
+        let mut digest = vec!{0; 32};
+
+        hasher.input(key);
+        hasher.input(&[index]);
+        hasher.result(&mut digest);
+
+        Ok(Self::bytes_to_usize(&digest, modulus)?)
+    }
+
+    fn get_map_value(key: &[u8], value: &[u8]) -> Result<E::Fr, Error> {
+        let mut hasher = Sha3::sha3_256();
+        let mut digest = vec!{0; 32};
+
+        hasher.input(key);
+        hasher.input(value);
+        hasher.result(&mut digest);
+
+        Ok(<E::Fr>::from_random_bytes(&digest)?)
+    }
+
+    fn construct_dense_polynomial(&self, index: usize) -> Result<DensePolynomial<E::Fr>, Error> {
+        if index >= self.polynomials.len() {
+            return Err(Error::Default(String::from("Index out of range")));
+        }
+
+        // TODO: Experiment with `interpolate` over `inerpolate_by_ref`
+        Ok(self.polynomials[index].evaluations.interpolate_by_ref())
+    }
+
+    fn get_coefficients(&self, index: usize) -> Result<&DensePolynomial<E::Fr>, Error> {
+        Ok(self.polynomials[index].coefficients.as_ref()?)
+    }
+
+    fn get_powers(&self, index: usize) -> Result<Powers<E>, Error> {
+        if index >= self.polynomials.len() {
+            return Err(Error::Default(String::from("Index out of range")))
+        }
+
+        let p = &self.polynomials[index];
+        Ok(Powers::<E> {
+            powers_of_g: Cow::Owned(p.params.powers_of_g.to_vec()),
+            powers_of_gamma_g: Cow::Owned(p.params.powers_of_gamma_g.to_vec())
+        })
     }
 }
 
@@ -495,10 +483,10 @@ mod tests {
 
         assert!(hashmap.polynomials[0].commitment.is_some());
 
-        let result = hashmap.get_commitment(0);
-        assert!(result.is_ok());
+        let commitment = hashmap.polynomials[0].commitment;
+        assert!(commitment.is_some());
 
-        let c1 = result.unwrap();
+        let c1 = commitment.unwrap();
 
         // Add an additional point
         let result = hashmap.insert(&[4], &[4]);
@@ -507,10 +495,10 @@ mod tests {
         let result = hashmap.update_commitment();
         assert!(result.is_ok(), result.unwrap_err());
 
-        let result = hashmap.get_commitment(0);
-        assert!(result.is_ok());
+        let commitment = hashmap.polynomials[0].commitment;
+        assert!(commitment.is_some());
 
-        let c2 = result.unwrap();
+        let c2 = commitment.unwrap();
 
         // Assert that a new commitment was grenerated.
         assert_ne!(c1, c2);
@@ -521,7 +509,7 @@ mod tests {
         let result = hashmap.update_commitment();
         assert!(result.is_ok(), result.unwrap_err());
 
-        let c3 = hashmap.get_commitment(0).unwrap();
+        let c3 = hashmap.polynomials[0].commitment.unwrap();
 
         assert_eq!(c2, c3);
     }
