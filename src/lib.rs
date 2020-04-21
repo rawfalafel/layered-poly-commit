@@ -1,15 +1,18 @@
 #![feature(try_trait)]
 
 use algebra::Field;
-use algebra_core::PairingEngine;
 use algebra_core::bytes::ToBytes;
+use algebra_core::curves::PairingEngine;
+use algebra_core::fields::PrimeField;
 use crypto::sha3::Sha3;
 use crypto::digest::Digest;
+use ff_fft::domain::EvaluationDomain;
+use ff_fft::evaluations::Evaluations;
 use ff_fft::polynomial::DensePolynomial;
 use num_bigint::{BigInt,Sign};
 use num_traits::{ToPrimitive,Zero};
 use poly_commit::PCRandomness;
-use poly_commit::kzg10::{KZG10, Randomness, Commitment, Proof, Powers, UniversalParams};
+use poly_commit::kzg10::{KZG10, Randomness, Commitment, Proof, Powers, UniversalParams, VerifierKey};
 use poly_commit::error::Error as PolyCommitError;
 use rand_core::RngCore;
 use std::borrow::Cow;
@@ -19,19 +22,35 @@ use std::option::NoneError;
 #[derive(Debug)]
 struct Polynomial<E: PairingEngine> {
     params: UniversalParams<E>,
-    evaluations: Vec<(usize, E::Fr)>,
+    verifier_key: VerifierKey<E>,
+    evaluations: Evaluations<E::Fr>,
+    coefficients: Option<DensePolynomial<E::Fr>>,
     commitment: Option<Commitment<E>>,
     dirty: bool
 }
 
 impl <E: PairingEngine> Polynomial<E> {
-    pub fn new(params: UniversalParams<E>, evaluations: Vec<(usize, E::Fr)>) -> Polynomial<E> {
-        Polynomial {
+    pub fn new(params: UniversalParams<E>, num_coeffs: usize) -> Result<Polynomial<E>, Error> {
+        let domain = EvaluationDomain::new(num_coeffs)?;
+        let evaluations = Evaluations::from_vec_and_domain(vec!{}, domain);
+
+        let vk = VerifierKey {
+            g: params.powers_of_g[0],
+            gamma_g: params.powers_of_gamma_g[0],
+            h: params.h,
+            beta_h: params.beta_h,
+            prepared_h: params.prepared_h.clone(),
+            prepared_beta_h: params.prepared_beta_h.clone(),
+        };
+
+        Ok(Polynomial {
             params: params,
+            verifier_key: vk,
             evaluations: evaluations,
+            coefficients: None,
             commitment: None,
             dirty: false
-        }
+        })
     }
 }
 
@@ -73,7 +92,7 @@ impl<E: PairingEngine> PolyHashMap<E> {
     pub fn setup<R: RngCore>(max_degree: usize, num_poly: usize, rng: &mut R) -> Result<PolyHashMap<E>, Error> {
         let polynomials = (0..num_poly).map(|_| {
             let params = KZG10::setup(max_degree, false, rng)?;
-            Ok(Polynomial::new(params, vec!{}))
+            Polynomial::new(params, max_degree)
         }).collect::<Result<Vec<Polynomial<E>>, Error>>()?;
 
         Ok(PolyHashMap{
@@ -125,29 +144,24 @@ impl<E: PairingEngine> PolyHashMap<E> {
 
             // Convert the digest to `hash(k, i) % n`
             let output_mod = BigInt::from_bytes_le(Sign::Plus, &digest) % self.num_degrees;
-            let poly_x = output_mod.to_usize().unwrap();
+            let poly_x = output_mod.to_usize()?;
 
             reset_digest(&mut digest);
 
-            let result = polynomial.evaluations.binary_search_by_key(&poly_x, |&(idx,_)| idx);
-
             // Key not found. Insert key into vector.
-            if result.is_err() {
-                let insertion_idx = result.err().unwrap();
-
+            if polynomial.evaluations[poly_x] == E::Fr::zero() {
                 // `output` is the digest for `hash(k, v)`
                 hasher.reset();
                 hasher.input(key);
                 hasher.input(value);
                 hasher.result(&mut digest);
 
-                // TODO: Check if conversion to E::Fr truncates numbers.
                 let poly_y = <E::Fr>::from_random_bytes(&digest).unwrap();
 
                 reset_digest(&mut digest);
 
                 // See: https://github.com/scipr-lab/zexe/blob/19489db9209cd79e1261370b0b2393b2f1d8c64f/algebra/src/bls12_381/fields/fr.rs#L14
-                polynomial.evaluations.insert(insertion_idx, (poly_x, poly_y));
+                polynomial.evaluations.evals[poly_x] = poly_y;
                 polynomial.dirty = true;
                 return Ok(());
             }
@@ -162,7 +176,7 @@ impl<E: PairingEngine> PolyHashMap<E> {
         let mut updates = vec!{};
 
         for (i, p) in self.polynomials.iter().enumerate() {
-            if p.evaluations.len() == 0 {
+            if p.evaluations.evals.len() == 0 {
                 break;
             }
 
@@ -176,11 +190,12 @@ impl<E: PairingEngine> PolyHashMap<E> {
             let result = KZG10::commit(&powers, &polynomial, None, None)?;
 
             let commitment: Commitment<E> = result.0;
-            updates.push((i, Some(commitment)));
+            updates.push((i, polynomial, Some(commitment)));
         }
 
-        for (i, commitment) in updates {
+        for (i, polynomial, commitment) in updates {
             self.polynomials[i].commitment = commitment;
+            self.polynomials[i].coefficients = Some(polynomial);
             self.polynomials[i].dirty = false;
         }
 
@@ -192,12 +207,8 @@ impl<E: PairingEngine> PolyHashMap<E> {
             return Err(Error::Default(String::from("Index out of range")));
         }
 
-        let mut polynomial = vec![E::Fr::zero(); self.num_degrees];
-        for (x, y) in self.polynomials[index].evaluations.iter() {
-            polynomial[*x] = *y;
-        }
-
-        Ok(DensePolynomial::from_coefficients_vec(polynomial))
+        // TODO: Experiment with `interpolate` over `inerpolate_by_ref`
+        Ok(self.polynomials[index].evaluations.interpolate_by_ref())
     }
 
     pub fn get_commitment(&self, index: usize) -> Result<Commitment<E>, Error> {
@@ -210,6 +221,10 @@ impl<E: PairingEngine> PolyHashMap<E> {
         }
 
         Ok(self.polynomials[index].commitment.unwrap())
+    }
+
+    fn get_coefficients(&self, index: usize) -> Result<&DensePolynomial<E::Fr>, Error> {
+        Ok(self.polynomials[index].coefficients.as_ref()?)
     }
 
     pub fn get_powers(&self, index: usize) -> Result<Powers<E>, Error> {
@@ -239,13 +254,16 @@ impl<E: PairingEngine> PolyHashMap<E> {
             reset_digest(&mut digest);
 
             let point = self.bytes_to_usize(&digest)?;
-            let result = polynomial.evaluations.binary_search_by_key(&point, |&(idx,_)| idx);
-            if result.is_err() {
+            if polynomial.evaluations.evals[point] == E::Fr::zero() {
                 continue;
             }
 
+            if polynomial.dirty == true {
+                return Err(Error::Default(String::from("Commitment is not up to date.")));
+            }
+
             let powers = self.get_powers(i)?;
-            let polynomial = self.construct_dense_polynomial(i)?;
+            let polynomial = self.get_coefficients(i)?;
             let point = self.bytes_to_fr(&digest)?;
             let rand = Randomness::<E>::empty();
 
@@ -257,6 +275,45 @@ impl<E: PairingEngine> PolyHashMap<E> {
 
     // -> verify
     // Verify that a given witness is valid.
+    pub fn verify(&self, k: &[u8], v: &[u8], proof: Proof<E>) -> Result<bool, Error> {
+        let mut hasher = Sha3::sha3_256();
+        let mut digest = [0; 32];
+
+        for (i, polynomial) in self.polynomials.iter().enumerate() {
+            // TODO: Dedupe logic shared with open
+            hasher.input(k);
+            hasher.input(&[i as u8]);
+            hasher.result(&mut digest);
+
+            reset_digest(&mut digest);
+
+            let point = self.bytes_to_usize(&digest)?;
+            if polynomial.evaluations.evals[point] == E::Fr::zero() {
+                continue;
+            }
+
+            if polynomial.dirty || polynomial.commitment.is_none() {
+                return Err(Error::Default(String::from("Commitment is not up to date.")));
+            }
+
+            // `output` is the digest for `hash(k, v)`
+            hasher.reset();
+            hasher.input(k);
+            hasher.input(v);
+            hasher.result(&mut digest);
+
+            let root_of_unity = <E::Fr>::root_of_unity();
+            let point = root_of_unity.pow(&[point as u64]);
+
+            let vk = &polynomial.verifier_key;
+            let commitment = polynomial.commitment.unwrap();
+            let poly_y = <E::Fr>::from_random_bytes(&digest).unwrap();
+
+            return Ok(KZG10::check(vk, &commitment, point, poly_y, &proof)?);
+        }
+
+        Err(Error::Default(String::from("Key not found")))
+    }
 }
 
 fn reset_digest(digest: &mut [u8]) {
@@ -270,10 +327,15 @@ mod tests {
     use super::{PolyHashMap,Error};
 
     use algebra::Bls12_381;
+    use algebra::bls12_381::Fr;
     use algebra_core::curves::PairingEngine;
-    use algebra_core::fields::Field;
+    use algebra_core::fields::{FpParameters, Field,PrimeField};
     use crypto::sha3::Sha3;
     use crypto::digest::Digest;
+    use ff_fft::domain::EvaluationDomain;
+    use ff_fft::evaluations::Evaluations;
+    use num_traits::pow;
+    use num_traits::identities::One;
     use rand_core::SeedableRng;
     use rand_pcg::Pcg32;
     use num_bigint::{BigInt,Sign};
@@ -343,6 +405,69 @@ mod tests {
 
         let point = result.unwrap();
         assert!(point < 100);
+    }
+
+    #[test]
+    fn test_simple_commitment() {
+        // Setup
+        let mut hashmap = setup(100, 3).unwrap();
+
+        // Insert three key/value pairs
+        assert!(hashmap.insert(&[1], &[1]).is_ok());
+        assert!(hashmap.insert(&[2], &[2]).is_ok());
+        assert!(hashmap.insert(&[3], &[3]).is_ok());
+
+        // Generate commitment
+        assert!(hashmap.update_commitment().is_ok());
+
+        // Open witness
+        let result = hashmap.open(&[1]);
+        assert!(result.is_ok());
+
+        let proof = result.unwrap();
+
+        // Verify
+        assert!(hashmap.verify(&[1], &[2], proof).is_ok());
+
+        assert!(hashmap.verify(&[1], &[3], proof).is_err());
+
+        // TODO: Verify the proof works for the given key/value pair, and not others.
+    }
+
+    #[test]
+    fn test_ifft() {
+        let log_degree_size = 2;
+        let num_degrees = pow(2, log_degree_size);
+
+        let domain = EvaluationDomain::<Fr>::new(num_degrees).unwrap();
+        let mut evaluations = Evaluations::from_vec_and_domain(vec!{}, domain);
+
+        let mut hasher = Sha3::sha3_256();
+        let mut digest = vec!{0; 32};
+
+        for i in 0..num_degrees {
+            hasher.input(&[i as u8]);
+            hasher.result(&mut digest);
+            hasher.reset();
+
+            let k = Fr::from_random_bytes(&digest).unwrap();
+            evaluations.evals.push(k);
+        }
+
+        let polynomial = evaluations.interpolate_by_ref();
+        println!("{:?}", polynomial);
+
+        // Assert that the evaluation for 0th power of the root of unity is correct.
+        assert_eq!(evaluations.evals[0], polynomial.evaluate(Fr::one()));
+
+        let mut root_of_unity = Fr::root_of_unity();
+        let two_adicity = <Fr as PrimeField>::Params::TWO_ADICITY as usize;
+        for _ in log_degree_size..two_adicity {
+            root_of_unity.square_in_place();
+        }
+
+        // Assert that the evaluation for the root of unity are correct.
+        assert_eq!(evaluations.evals[1], polynomial.evaluate(root_of_unity));
     }
 
     #[test]
