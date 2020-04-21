@@ -408,6 +408,9 @@ mod tests {
         // Attempt to open witness for a point without an evaluation
         let result = hashmap.open(&[1], &[100]);
         assert!(result.is_err(), format!{"{:?}", result.ok()});
+
+        // Attempt to open witness for a non-existing point
+        assert!(hashmap.open(&[4], &[4]).is_err());
     }
 
     #[test]
@@ -415,17 +418,21 @@ mod tests {
         let mut hashmap = setup(128, 3).unwrap();
 
         assert!(hashmap.insert(&[1], &[1]).is_ok());
-        assert!(hashmap.insert(&[2], &[2]).is_ok());
-        assert!(hashmap.insert(&[3], &[3]).is_ok());
-        /*
+
+        assert!(hashmap.update_commitment().is_ok());
+
+        let result = hashmap.open(&[1], &[1]);
+        assert!(result.is_ok());
+
         let proof = result.unwrap();
 
-        // Verify
-        assert!(hashmap.verify(&[1], &[2], proof).is_ok());
+        let result = hashmap.verify(&[1], &[1], proof);
+        assert!(result.is_ok());
+        assert!(result.unwrap() == true);
 
-        assert!(hashmap.verify(&[1], &[3], proof).is_err());
-        */
-        // TODO: Verify the proof works for the given key/value pair, and not others.
+        let result = hashmap.verify(&[1], &[2], proof);
+        assert!(result.is_ok());
+        assert!(result.unwrap() == false);
     }
 
     #[test]
