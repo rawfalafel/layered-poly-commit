@@ -3,7 +3,7 @@
 use algebra::Field;
 use algebra_core::bytes::ToBytes;
 use algebra_core::curves::PairingEngine;
-use algebra_core::fields::PrimeField;
+use algebra_core::fields::{FpParameters, PrimeField};
 use crypto::sha3::Sha3;
 use crypto::digest::Digest;
 use ff_fft::domain::EvaluationDomain;
@@ -21,18 +21,18 @@ use std::option::NoneError;
 
 #[derive(Debug)]
 struct Polynomial<E: PairingEngine> {
-    params: UniversalParams<E>,
-    verifier_key: VerifierKey<E>,
     evaluations: Evaluations<E::Fr>,
     coefficients: Option<DensePolynomial<E::Fr>>,
     commitment: Option<Commitment<E>>,
+    params: UniversalParams<E>,
+    verifier_key: VerifierKey<E>,
     dirty: bool
 }
 
 impl <E: PairingEngine> Polynomial<E> {
     pub fn new(params: UniversalParams<E>, num_coeffs: usize) -> Result<Polynomial<E>, Error> {
         let domain = EvaluationDomain::new(num_coeffs)?;
-        let evaluations = Evaluations::from_vec_and_domain(vec!{}, domain);
+        let evaluations = Evaluations::from_vec_and_domain(vec!{E::Fr::zero(); num_coeffs}, domain);
 
         let vk = VerifierKey {
             g: params.powers_of_g[0],
@@ -57,7 +57,8 @@ impl <E: PairingEngine> Polynomial<E> {
 #[derive(Debug)]
 pub struct PolyHashMap<E: PairingEngine> {
     polynomials: Vec<Polynomial<E>>,
-    num_degrees: usize
+    num_degrees: usize,
+    root_of_unity: E::Fr
 }
 
 #[derive(Debug)]
@@ -90,6 +91,17 @@ impl<E: PairingEngine> PolyHashMap<E> {
     // -> setup
     // Generate a vector of polynomials of degree n.
     pub fn setup<R: RngCore>(max_degree: usize, num_poly: usize, rng: &mut R) -> Result<PolyHashMap<E>, Error> {
+        if max_degree != max_degree.next_power_of_two() {
+            return Err(Error::Default(String::from("max_degree must be a power of two")));
+        }
+
+        let mut root_of_unity = E::Fr::root_of_unity();
+        let log_degree_size = max_degree.trailing_zeros();
+        let two_adicity = <E::Fr as PrimeField>::Params::TWO_ADICITY;
+        for _ in log_degree_size..two_adicity {
+            root_of_unity.square_in_place();
+        }
+
         let polynomials = (0..num_poly).map(|_| {
             let params = KZG10::setup(max_degree, false, rng)?;
             Polynomial::new(params, max_degree)
@@ -97,74 +109,73 @@ impl<E: PairingEngine> PolyHashMap<E> {
 
         Ok(PolyHashMap{
             polynomials: polynomials,
-            num_degrees: max_degree
+            num_degrees: max_degree,
+            root_of_unity: root_of_unity
         })
     }
 
-    fn bytes_to_mod_degrees(&self, value: &[u8]) -> Result<BigInt, Error> {
-        // Note: `from_random_bytes` multiplies the integer representation of the raw bytes by `Fr::R`
+    // TODO: Avoid [u8] -> E::Fr -> BigInt conversions
+    fn bytes_to_modulus(value: &[u8], modulus: usize) -> Result<BigInt, Error> {
+        // Note: `from_random_bytes` multiplies the integer representation of the raw bytes by `Fr::R2`
         let p = <E::Fr>::from_random_bytes(value)?;
 
-        let mut p_u32 = vec!{0; 32};
+        // Note: This needs to be an empty vector to behave correctly.
+        let mut p_u32 = vec!{};
         p.write(&mut p_u32)?;
 
         let p_u32 = BigInt::from_bytes_le(Sign::Plus, &p_u32);
 
-        Ok(p_u32 % self.num_degrees)
+        Ok(p_u32 % modulus)
     }
 
-    fn bytes_to_usize(&self, value: &[u8]) -> Result<usize, Error> {
-        let bytes_usize = self.bytes_to_mod_degrees(value)?.to_usize()?;
+    fn bytes_to_usize(value: &[u8], modulus: usize) -> Result<usize, Error> {
+        let bytes_usize = Self::bytes_to_modulus(value, modulus)?.to_usize()?;
         Ok(bytes_usize)
     }
 
-    fn bytes_to_fr(&self, value: &[u8]) -> Result<E::Fr, Error> {
-        let bi = self.bytes_to_mod_degrees(value)?;
+    fn point_to_root_of_unity(root_of_unity: E::Fr, point: usize) -> E::Fr {
+        root_of_unity.pow(&[point as u64])
+    }
 
-        let bi_bytes = bi.to_bytes_le().1;
-        let field = <E::Fr>::from_random_bytes(&bi_bytes)?;
-        Ok(field)
+    fn get_map_key(key: &[u8], index: u8, modulus: usize) -> Result<usize, Error> {
+        let mut hasher = Sha3::sha3_256();
+        let mut digest = vec!{0; 32};
+
+        hasher.input(key);
+        hasher.input(&[index]);
+        hasher.result(&mut digest);
+
+        Ok(Self::bytes_to_usize(&digest, modulus)?)
+    }
+
+    fn get_map_value(key: &[u8], value: &[u8]) -> Result<E::Fr, Error> {
+        let mut hasher = Sha3::sha3_256();
+        let mut digest = vec!{0; 32};
+
+        hasher.input(key);
+        hasher.input(value);
+        hasher.result(&mut digest);
+
+        Ok(<E::Fr>::from_random_bytes(&digest)?)
     }
 
     // `insert` updates the first polynomial for which `hash(k, i) % n` is empty.
     // Inserts `hash(k, v)` as the value.
     pub fn insert(&mut self, key: &[u8], value: &[u8]) -> Result<(), Error> {
-        // TODO: Test if a single hasher should be instantiated for a single PolyHashMap instance.
-        let mut hasher = Sha3::sha3_256();
-        let mut digest = vec!{0; 32};
-
         // Find the first polynomial in which `hash(k, i)` is empty
         for (i, polynomial) in self.polynomials.iter_mut().enumerate() {
+            let point = Self::get_map_key(key, i as u8, self.num_degrees)?;
 
-            // `output` is the digest for `hash(k, i)`
-            hasher.reset();
-            hasher.input(key);
-            hasher.input(&[i as u8]);
-            hasher.result(&mut digest);
-
-            // Convert the digest to `hash(k, i) % n`
-            let output_mod = BigInt::from_bytes_le(Sign::Plus, &digest) % self.num_degrees;
-            let poly_x = output_mod.to_usize()?;
-
-            reset_digest(&mut digest);
-
-            // Key not found. Insert key into vector.
-            if polynomial.evaluations[poly_x] == E::Fr::zero() {
-                // `output` is the digest for `hash(k, v)`
-                hasher.reset();
-                hasher.input(key);
-                hasher.input(value);
-                hasher.result(&mut digest);
-
-                let poly_y = <E::Fr>::from_random_bytes(&digest).unwrap();
-
-                reset_digest(&mut digest);
-
-                // See: https://github.com/scipr-lab/zexe/blob/19489db9209cd79e1261370b0b2393b2f1d8c64f/algebra/src/bls12_381/fields/fr.rs#L14
-                polynomial.evaluations.evals[poly_x] = poly_y;
-                polynomial.dirty = true;
-                return Ok(());
+            if polynomial.evaluations[point] != E::Fr::zero() {
+                continue;
             }
+
+            let poly_y = Self::get_map_value(key, value)?;
+
+            // See: https://github.com/scipr-lab/zexe/blob/19489db9209cd79e1261370b0b2393b2f1d8c64f/algebra/src/bls12_381/fields/fr.rs#L14
+            polynomial.evaluations.evals[point] = poly_y;
+            polynomial.dirty = true;
+            return Ok(());
         }
 
         Err(Error::Default(String::from("Failed to find an empty polynomial.")))
@@ -241,30 +252,28 @@ impl<E: PairingEngine> PolyHashMap<E> {
 
     // -> open
     // Generate a witness for a given key
-    pub fn open(&self, k: &[u8]) -> Result<Proof<E>, Error> {
-        // Iterate over polynomials. Find polynomial for which p exists.
-        let mut hasher = Sha3::sha3_256();
-        let mut digest = [0; 32];
+    pub fn open(&self, k: &[u8], v: &[u8]) -> Result<Proof<E>, Error> {
+        // First, calculate the field representation of the value stored.
+        let poly_y = Self::get_map_value(k, v)?;
 
         for (i, polynomial) in self.polynomials.iter().enumerate() {
-            hasher.input(k);
-            hasher.input(&[i as u8]);
-            hasher.result(&mut digest);
-
-            reset_digest(&mut digest);
-
-            let point = self.bytes_to_usize(&digest)?;
-            if polynomial.evaluations.evals[point] == E::Fr::zero() {
-                continue;
-            }
-
             if polynomial.dirty == true {
                 return Err(Error::Default(String::from("Commitment is not up to date.")));
             }
 
+            let point = Self::get_map_key(k, i as u8, self.num_degrees)?;
+
+            if polynomial.evaluations.evals[point] == E::Fr::zero() {
+                continue;
+            }
+
+            if polynomial.evaluations.evals[point] != poly_y {
+                continue;
+            }
+
             let powers = self.get_powers(i)?;
             let polynomial = self.get_coefficients(i)?;
-            let point = self.bytes_to_fr(&digest)?;
+            let point = Self::point_to_root_of_unity(self.root_of_unity, point);
             let rand = Randomness::<E>::empty();
 
             return Ok(KZG10::open(&powers, &polynomial, point, &rand)?);
@@ -276,49 +285,24 @@ impl<E: PairingEngine> PolyHashMap<E> {
     // -> verify
     // Verify that a given witness is valid.
     pub fn verify(&self, k: &[u8], v: &[u8], proof: Proof<E>) -> Result<bool, Error> {
-        let mut hasher = Sha3::sha3_256();
-        let mut digest = [0; 32];
-
         for (i, polynomial) in self.polynomials.iter().enumerate() {
-            // TODO: Dedupe logic shared with open
-            hasher.input(k);
-            hasher.input(&[i as u8]);
-            hasher.result(&mut digest);
-
-            reset_digest(&mut digest);
-
-            let point = self.bytes_to_usize(&digest)?;
-            if polynomial.evaluations.evals[point] == E::Fr::zero() {
-                continue;
-            }
-
             if polynomial.dirty || polynomial.commitment.is_none() {
                 return Err(Error::Default(String::from("Commitment is not up to date.")));
             }
 
-            // `output` is the digest for `hash(k, v)`
-            hasher.reset();
-            hasher.input(k);
-            hasher.input(v);
-            hasher.result(&mut digest);
-
-            let root_of_unity = <E::Fr>::root_of_unity();
-            let point = root_of_unity.pow(&[point as u64]);
+            let point = Self::get_map_key(k, i as u8, self.num_degrees)?;
+            if polynomial.evaluations.evals[point] == E::Fr::zero() {
+                continue;
+            }
 
             let vk = &polynomial.verifier_key;
             let commitment = polynomial.commitment.unwrap();
-            let poly_y = <E::Fr>::from_random_bytes(&digest).unwrap();
-
+            let point = Self::point_to_root_of_unity(self.root_of_unity, point);
+            let poly_y = Self::get_map_value(k, v)?;
             return Ok(KZG10::check(vk, &commitment, point, poly_y, &proof)?);
         }
 
         Err(Error::Default(String::from("Key not found")))
-    }
-}
-
-fn reset_digest(digest: &mut [u8]) {
-    for v in digest.iter_mut() {
-        *v = 0;
     }
 }
 
@@ -350,7 +334,7 @@ mod tests {
 
     #[test]
     fn test_setup() {
-        let result = setup(5, 5);
+        let result = setup(8, 5);
 
         assert!(result.is_ok(), result.unwrap_err());
     }
@@ -396,11 +380,10 @@ mod tests {
 
     #[test]
     fn test_bytes_to_point() {
+        let num_degrees = 128;
         let input = [0xf; 32];
 
-        let hashmap = setup(100, 3).unwrap();
-
-        let result = hashmap.bytes_to_usize(&input);
+        let result = PolyHashMapBls12_381::bytes_to_usize(&input, num_degrees);
         assert!(result.is_ok());
 
         let point = result.unwrap();
@@ -408,29 +391,40 @@ mod tests {
     }
 
     #[test]
-    fn test_simple_commitment() {
+    fn test_open_commitment() {
         // Setup
         let mut hashmap = setup(128, 3).unwrap();
 
         // Insert three key/value pairs
         assert!(hashmap.insert(&[1], &[1]).is_ok());
-        assert!(hashmap.insert(&[2], &[2]).is_ok());
-        assert!(hashmap.insert(&[3], &[3]).is_ok());
 
         // Generate commitment
         assert!(hashmap.update_commitment().is_ok());
 
         // Open witness
-        let result = hashmap.open(&[1]);
-        assert!(result.is_ok());
+        let result = hashmap.open(&[1], &[1]);
+        assert!(result.is_ok(), format!{"{:?}", result.err()});
 
+        // Attempt to open witness for a point without an evaluation
+        let result = hashmap.open(&[1], &[100]);
+        assert!(result.is_err(), format!{"{:?}", result.ok()});
+    }
+
+    #[test]
+    fn test_verify_proof() {
+        let mut hashmap = setup(128, 3).unwrap();
+
+        assert!(hashmap.insert(&[1], &[1]).is_ok());
+        assert!(hashmap.insert(&[2], &[2]).is_ok());
+        assert!(hashmap.insert(&[3], &[3]).is_ok());
+        /*
         let proof = result.unwrap();
 
         // Verify
         assert!(hashmap.verify(&[1], &[2], proof).is_ok());
 
         assert!(hashmap.verify(&[1], &[3], proof).is_err());
-
+        */
         // TODO: Verify the proof works for the given key/value pair, and not others.
     }
 
@@ -476,7 +470,7 @@ mod tests {
 
     #[test]
     fn test_commitment() {
-        let mut hashmap = setup(100, 3).unwrap();
+        let mut hashmap = setup(128, 3).unwrap();
 
         assert!(hashmap.polynomials[0].commitment.is_none());
 
@@ -496,7 +490,8 @@ mod tests {
         let c1 = result.unwrap();
 
         // Add an additional point
-        assert!(hashmap.insert(&[4], &[4]).is_ok());
+        let result = hashmap.insert(&[4], &[4]);
+        assert!(result.is_ok(), format!{"{:?}", result});
 
         let result = hashmap.update_commitment();
         assert!(result.is_ok(), result.unwrap_err());
