@@ -329,7 +329,7 @@ mod tests {
     use algebra::Bls12_381;
     use algebra::bls12_381::Fr;
     use algebra_core::curves::PairingEngine;
-    use algebra_core::fields::{FpParameters, Field,PrimeField};
+    use algebra_core::fields::{FpParameters, Field, PrimeField};
     use crypto::sha3::Sha3;
     use crypto::digest::Digest;
     use ff_fft::domain::EvaluationDomain;
@@ -410,7 +410,7 @@ mod tests {
     #[test]
     fn test_simple_commitment() {
         // Setup
-        let mut hashmap = setup(100, 3).unwrap();
+        let mut hashmap = setup(128, 3).unwrap();
 
         // Insert three key/value pairs
         assert!(hashmap.insert(&[1], &[1]).is_ok());
@@ -436,7 +436,7 @@ mod tests {
 
     #[test]
     fn test_ifft() {
-        let log_degree_size = 2;
+        let log_degree_size = 5;
         let num_degrees = pow(2, log_degree_size);
 
         let domain = EvaluationDomain::<Fr>::new(num_degrees).unwrap();
@@ -468,6 +468,10 @@ mod tests {
 
         // Assert that the evaluation for the root of unity are correct.
         assert_eq!(evaluations.evals[1], polynomial.evaluate(root_of_unity));
+
+        let evaluation_index = num_degrees-1;
+        let root_of_unity = root_of_unity.pow(&[evaluation_index as u64]);
+        assert_eq!(evaluations.evals[evaluation_index], polynomial.evaluate(root_of_unity));
     }
 
     #[test]
