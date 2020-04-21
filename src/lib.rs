@@ -284,7 +284,7 @@ impl<E: PairingEngine> PolyHashMap<E> {
 
     // -> verify
     // Verify that a given witness is valid.
-    pub fn verify(&self, k: &[u8], v: &[u8], proof: Proof<E>) -> Result<bool, Error> {
+    pub fn verify(&self, k: &[u8], v: &[u8], proof: Proof<E>) -> Result<(), Error> {
         for (i, polynomial) in self.polynomials.iter().enumerate() {
             if polynomial.dirty || polynomial.commitment.is_none() {
                 return Err(Error::Default(String::from("Commitment is not up to date.")));
@@ -299,7 +299,13 @@ impl<E: PairingEngine> PolyHashMap<E> {
             let commitment = polynomial.commitment.unwrap();
             let point = Self::point_to_root_of_unity(self.root_of_unity, point);
             let poly_y = Self::get_map_value(k, v)?;
-            return Ok(KZG10::check(vk, &commitment, point, poly_y, &proof)?);
+
+            let valid = KZG10::check(vk, &commitment, point, poly_y, &proof)?;
+            if valid {
+                return Ok(());
+            } else {
+                return Err(Error::Default(String::from("Proof is not valid")));
+            }
         }
 
         Err(Error::Default(String::from("Key not found")))
@@ -428,11 +434,9 @@ mod tests {
 
         let result = hashmap.verify(&[1], &[1], proof);
         assert!(result.is_ok());
-        assert!(result.unwrap() == true);
 
         let result = hashmap.verify(&[1], &[2], proof);
-        assert!(result.is_ok());
-        assert!(result.unwrap() == false);
+        assert!(result.is_err());
     }
 
     #[test]
