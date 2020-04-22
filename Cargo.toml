@@ -1,5 +1,5 @@
 [package]
-name = "poly-commit-hashmap"
+name = "layered-poly-commit"
 version = "0.1.0"
 authors = ["Yutaro Mori <me@yutaromori.com>"]
 edition = "2018"

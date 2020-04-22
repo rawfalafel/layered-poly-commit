@@ -5,7 +5,7 @@ extern crate rand;
 
 #[cfg(test)]
 mod tests {
-    use poly_commit_hashmap::layered_poly_commit::LayeredPolyCommit;
+    use layered_poly_commit::layered_poly_commit::LayeredPolyCommit;
     use algebra::Bls12_381;
     use rand::RngCore;
     use num_traits::pow;
