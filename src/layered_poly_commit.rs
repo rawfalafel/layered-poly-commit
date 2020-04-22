@@ -21,33 +21,26 @@ pub struct LayeredPolyCommit<E: PairingEngine> {
 }
 
 impl<E: PairingEngine> LayeredPolyCommit<E> {
-    // -> setup
     // Generate a vector of polynomials of degree n.
-    pub fn setup<R: RngCore>(max_degree: usize, num_poly: usize, rng: &mut R) -> Result<LayeredPolyCommit<E>, Error> {
-        if max_degree != max_degree.next_power_of_two() {
-            return Err(Error::SetupInvalidDegree(max_degree));
-        }
-
-        let mut root_of_unity = E::Fr::root_of_unity();
-        let log_degree_size = max_degree.trailing_zeros();
-        let two_adicity = <E::Fr as PrimeField>::Params::TWO_ADICITY;
-        for _ in log_degree_size..two_adicity {
-            root_of_unity.square_in_place();
+    pub fn setup<R: RngCore>(num_degree: usize, num_poly: usize, rng: &mut R) -> Result<LayeredPolyCommit<E>, Error> {
+        if num_degree != num_degree.next_power_of_two() {
+            return Err(Error::SetupInvalidDegree(num_degree));
         }
 
         let layers = (0..num_poly).map(|_| {
-            let params = KZG10::setup(max_degree, false, rng)?;
-            Layer::new(params, max_degree)
+            let params = KZG10::setup(num_degree, false, rng)?;
+            Layer::new(params, num_degree)
         }).collect::<Result<Vec<Layer<E>>, Error>>()?;
+
+        let root_of_unity = Self::generate_root_of_unity(num_degree);
 
         Ok(LayeredPolyCommit{
             layers,
-            num_degrees: max_degree,
+            num_degrees: num_degree,
             root_of_unity: root_of_unity
         })
     }
 
-    // `insert` updates the first polynomial for which `hash(k, i) % n` is empty.
     // Inserts `hash(k, v)` as the value.
     pub fn insert(&mut self, key: &[u8], value: &[u8]) -> Result<(), Error> {
         // Find the first polynomial in which `hash(k, i)` is empty
@@ -60,7 +53,6 @@ impl<E: PairingEngine> LayeredPolyCommit<E> {
 
             let poly_y = Self::construct_map_value(key, value)?;
 
-            // See: https://github.com/scipr-lab/zexe/blob/19489db9209cd79e1261370b0b2393b2f1d8c64f/algebra/src/bls12_381/fields/fr.rs#L14
             layer.set_value(point, poly_y);
             return Ok(());
         }
@@ -68,7 +60,6 @@ impl<E: PairingEngine> LayeredPolyCommit<E> {
         Err(Error::EmptyLayerNotFound(key.to_vec()))
     }
 
-    // -> update_commitment
     // Update commitment for polynomials since last UpdateCommitment call.
     pub fn update_commitment(&mut self) -> Result<(), Error> {
         let mut updates = vec!{};
@@ -79,10 +70,9 @@ impl<E: PairingEngine> LayeredPolyCommit<E> {
             }
 
             let coefficients = layer.interpolate();
+
             let powers = layer.get_powers();
-
             let result = KZG10::commit(&powers, &coefficients, None, None)?;
-
             let commitment: Commitment<E> = result.0;
             updates.push((i, coefficients, commitment));
         }
@@ -94,7 +84,6 @@ impl<E: PairingEngine> LayeredPolyCommit<E> {
         Ok(())
     }
 
-    // -> open
     // Generate a witness for a given key
     pub fn open(&self, key: &[u8], value: &[u8]) -> Result<Proof<E>, Error> {
         // First, calculate the field representation of the value stored.
@@ -126,25 +115,24 @@ impl<E: PairingEngine> LayeredPolyCommit<E> {
         Err(Error::KeyNotFound(key.to_vec()))
     }
 
-    // -> verify
     // Verify that a given witness is valid.
     pub fn verify(&self, key: &[u8], value: &[u8], proof: Proof<E>) -> Result<(), Error> {
         for (i, layer) in self.layers.iter().enumerate() {
+            let point = Self::construct_map_key(key, i as u8, self.num_degrees)?;
+            if !layer.has_value(point) {
+                continue;
+            }
+
             if layer.dirty || layer.commitment.is_none() {
                 return Err(Error::CommitmentInvalid);
             }
 
-            let point = Self::construct_map_key(key, i as u8, self.num_degrees)?;
-            if layer.evaluations.evals[point] == E::Fr::zero() {
-                continue;
-            }
-
-            let vk = &layer.get_verifier_key();
+            let vk = layer.get_verifier_key();
             let commitment = layer.commitment.unwrap();
             let point = Self::point_to_root_of_unity(self.root_of_unity, point);
             let poly_y = Self::construct_map_value(key, value)?;
 
-            let valid = KZG10::check(vk, &commitment, point, poly_y, &proof)?;
+            let valid = KZG10::check(&vk, &commitment, point, poly_y, &proof)?;
             if valid {
                 return Ok(());
             } else {
@@ -153,6 +141,17 @@ impl<E: PairingEngine> LayeredPolyCommit<E> {
         }
 
         Err(Error::KeyNotFound(key.to_vec()))
+    }
+
+    fn generate_root_of_unity(num_degree: usize) -> E::Fr {
+        let mut root_of_unity = E::Fr::root_of_unity();
+        let log_degree_size = num_degree.trailing_zeros();
+        let two_adicity = <E::Fr as PrimeField>::Params::TWO_ADICITY;
+        for _ in log_degree_size..two_adicity {
+            root_of_unity.square_in_place();
+        }
+
+        root_of_unity
     }
 
     // TODO: Avoid [u8] -> E::Fr -> BigInt conversions
@@ -310,6 +309,8 @@ mod tests {
         let mut hashmap = setup(128, 3).unwrap();
 
         assert!(hashmap.insert(&[1], &[1]).is_ok());
+        assert!(hashmap.insert(&[2], &[2]).is_ok());
+        assert!(hashmap.insert(&[3], &[3]).is_ok());
 
         assert!(hashmap.update_commitment().is_ok());
 
@@ -319,6 +320,14 @@ mod tests {
         let proof = result.unwrap();
 
         let result = hashmap.verify(&[1], &[1], proof);
+        assert!(result.is_ok());
+
+        let result = hashmap.open(&[2], &[2]);
+        assert!(result.is_ok());
+
+        let proof = result.unwrap();
+
+        let result = hashmap.verify(&[2], &[2], proof);
         assert!(result.is_ok());
 
         let result = hashmap.verify(&[1], &[2], proof);
