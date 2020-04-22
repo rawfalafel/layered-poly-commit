@@ -1,5 +1,7 @@
 #![feature(try_trait)]
 
+extern crate rand;
+
 pub mod layered_poly_commit;
 pub use self::layered_poly_commit::LayeredPolyCommit;
 

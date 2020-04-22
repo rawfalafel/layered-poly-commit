@@ -143,6 +143,12 @@ impl<E: PairingEngine> LayeredPolyCommit<E> {
         Err(Error::KeyNotFound(key.to_vec()))
     }
 
+    pub fn clear_layers(&mut self) {
+        for layer in self.layers.iter_mut() {
+            layer.clear();
+        }
+    }
+
     fn generate_root_of_unity(num_degree: usize) -> E::Fr {
         let mut root_of_unity = E::Fr::root_of_unity();
         let log_degree_size = num_degree.trailing_zeros();
@@ -215,12 +221,12 @@ mod tests {
     use rand_pcg::Pcg32;
     use num_bigint::{BigInt,Sign};
 
-    type LayeredPolyCommitBLS12_381 = LayeredPolyCommit<Bls12_381>;
+    type LayeredPolyCommitBls12_381 = LayeredPolyCommit<Bls12_381>;
 
-    fn setup(max_degree: usize, num_poly: usize) -> Result<LayeredPolyCommitBLS12_381, Error> {
+    fn setup(max_degree: usize, num_poly: usize) -> Result<LayeredPolyCommitBls12_381, Error> {
         let seed = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15];
         let mut rng = Pcg32::from_seed(seed);
-        LayeredPolyCommitBLS12_381::setup(max_degree, num_poly, &mut rng)
+        LayeredPolyCommitBls12_381::setup(max_degree, num_poly, &mut rng)
     }
 
     #[test]
@@ -274,7 +280,7 @@ mod tests {
         let num_degrees = 128;
         let input = [0xf; 32];
 
-        let result = LayeredPolyCommitBLS12_381::random_bytes_to_evaluation_point(&input, num_degrees);
+        let result = LayeredPolyCommitBls12_381::random_bytes_to_evaluation_point(&input, num_degrees);
         assert!(result.is_ok());
 
         let point = result.unwrap();

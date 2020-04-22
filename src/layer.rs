@@ -50,6 +50,14 @@ impl <E: PairingEngine> Layer<E> {
         self.evaluations.interpolate_by_ref()
     }
 
+    pub fn clear(&mut self) {
+        let num_coeffs = self.evaluations.evals.len();
+        self.evaluations.evals = vec!{E::Fr::zero(); num_coeffs};
+        self.coefficients = None;
+        self.commitment = None;
+        self.dirty = false;
+    }
+
     pub fn get_powers(&self) -> Powers<E> {
         Powers::<E> {
             powers_of_g: Cow::Borrowed(&self.params.powers_of_g),
