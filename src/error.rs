@@ -4,10 +4,14 @@ use std::option::NoneError;
 
 #[derive(Debug)]
 pub enum Error {
+    SetupInvalidDegree(usize),
+    CommitmentInvalid,
+    KeyNotFound(Vec<u8>),
+    EmptyLayerNotFound(Vec<u8>),
+    InvalidProof,
     PolyCommitError(PolyCommitError),
     IOError(IOError),
-    NoneError(NoneError),
-    Default(String)
+    NoneError(NoneError)
 }
 
 impl From<NoneError> for Error {

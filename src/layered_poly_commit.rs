@@ -25,7 +25,7 @@ impl<E: PairingEngine> LayeredPolyCommit<E> {
     // Generate a vector of polynomials of degree n.
     pub fn setup<R: RngCore>(max_degree: usize, num_poly: usize, rng: &mut R) -> Result<LayeredPolyCommit<E>, Error> {
         if max_degree != max_degree.next_power_of_two() {
-            return Err(Error::Default(String::from("max_degree must be a power of two")));
+            return Err(Error::SetupInvalidDegree(max_degree));
         }
 
         let mut root_of_unity = E::Fr::root_of_unity();
@@ -65,7 +65,7 @@ impl<E: PairingEngine> LayeredPolyCommit<E> {
             return Ok(());
         }
 
-        Err(Error::Default(String::from("Failed to find an empty polynomial.")))
+        Err(Error::EmptyLayerNotFound(key.to_vec()))
     }
 
     // -> update_commitment
@@ -96,16 +96,16 @@ impl<E: PairingEngine> LayeredPolyCommit<E> {
 
     // -> open
     // Generate a witness for a given key
-    pub fn open(&self, k: &[u8], v: &[u8]) -> Result<Proof<E>, Error> {
+    pub fn open(&self, key: &[u8], value: &[u8]) -> Result<Proof<E>, Error> {
         // First, calculate the field representation of the value stored.
-        let poly_y = Self::construct_map_value(k, v)?;
+        let poly_y = Self::construct_map_value(key, value)?;
 
         for (i, layer) in self.layers.iter().enumerate() {
             if layer.dirty == true {
-                return Err(Error::Default(String::from("Commitment is not up to date.")));
+                return Err(Error::CommitmentInvalid);
             }
 
-            let point = Self::construct_map_key(k, i as u8, self.num_degrees)?;
+            let point = Self::construct_map_key(key, i as u8, self.num_degrees)?;
 
             if layer.evaluations.evals[point] == E::Fr::zero() {
                 continue;
@@ -123,18 +123,18 @@ impl<E: PairingEngine> LayeredPolyCommit<E> {
             return Ok(KZG10::open(&powers, coefficients, point, &rand)?);
         }
 
-        Err(Error::Default(String::from("Key not found")))
+        Err(Error::KeyNotFound(key.to_vec()))
     }
 
     // -> verify
     // Verify that a given witness is valid.
-    pub fn verify(&self, k: &[u8], v: &[u8], proof: Proof<E>) -> Result<(), Error> {
+    pub fn verify(&self, key: &[u8], value: &[u8], proof: Proof<E>) -> Result<(), Error> {
         for (i, layer) in self.layers.iter().enumerate() {
             if layer.dirty || layer.commitment.is_none() {
-                return Err(Error::Default(String::from("Commitment is not up to date.")));
+                return Err(Error::CommitmentInvalid);
             }
 
-            let point = Self::construct_map_key(k, i as u8, self.num_degrees)?;
+            let point = Self::construct_map_key(key, i as u8, self.num_degrees)?;
             if layer.evaluations.evals[point] == E::Fr::zero() {
                 continue;
             }
@@ -142,17 +142,17 @@ impl<E: PairingEngine> LayeredPolyCommit<E> {
             let vk = &layer.get_verifier_key();
             let commitment = layer.commitment.unwrap();
             let point = Self::point_to_root_of_unity(self.root_of_unity, point);
-            let poly_y = Self::construct_map_value(k, v)?;
+            let poly_y = Self::construct_map_value(key, value)?;
 
             let valid = KZG10::check(vk, &commitment, point, poly_y, &proof)?;
             if valid {
                 return Ok(());
             } else {
-                return Err(Error::Default(String::from("Proof is not valid")));
+                return Err(Error::InvalidProof);
             }
         }
 
-        Err(Error::Default(String::from("Key not found")))
+        Err(Error::KeyNotFound(key.to_vec()))
     }
 
     // TODO: Avoid [u8] -> E::Fr -> BigInt conversions
