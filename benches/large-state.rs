@@ -17,22 +17,6 @@ mod tests {
 
     #[bench]
     fn bench_large_state(b: &mut Bencher) {
-        /*
-        // # of keys stored = 2^20 = 1048576
-        // # of keys per layer = 2^15 = 32768
-        // # of layers = 2^6 = 64
-        let num_degree = pow(2, 10);
-        let num_poly = 64;
-        */
-        /*
-        // # of keys stored = 2^15 = 32768
-        // # of keys per layer = 2^11 = 2048
-        // # of layers = 2^6 = 64
-        let num_total_keys = pow(2, 15);
-        let num_degree = pow(2, 11);
-        let num_poly = 64;
-        */
-
         // # of keys stored = 2^10 = 1024
         // # of keys per layer = 2^5 = 32
         // # of layers = 2^5 = 32

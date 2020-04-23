@@ -15,7 +15,7 @@ use crate::error::Error;
 
 #[derive(Debug)]
 pub struct LayeredPolyCommit<E: PairingEngine> {
-    layers: Vec<Layer<E>>,
+    pub layers: Vec<Layer<E>>,
     num_degrees: usize,
     root_of_unity: E::Fr
 }
@@ -182,7 +182,7 @@ impl<E: PairingEngine> LayeredPolyCommit<E> {
 
     fn construct_map_key(key: &[u8], index: u8, modulus: usize) -> Result<usize, Error> {
         let mut hasher = Sha3::sha3_256();
-        let mut digest = vec!{0; 32};
+        let mut digest = [0; 32];
 
         hasher.input(key);
         hasher.input(&[index]);
@@ -193,7 +193,7 @@ impl<E: PairingEngine> LayeredPolyCommit<E> {
 
     fn construct_map_value(key: &[u8], value: &[u8]) -> Result<E::Fr, Error> {
         let mut hasher = Sha3::sha3_256();
-        let mut digest = vec!{0; 32};
+        let mut digest = [0; 32];
 
         hasher.input(key);
         hasher.input(value);

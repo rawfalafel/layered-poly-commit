@@ -58,6 +58,10 @@ impl <E: PairingEngine> Layer<E> {
         self.dirty = false;
     }
 
+    pub fn fill_count(&self) -> usize {
+        self.evaluations.evals.iter().filter(|&f| *f != E::Fr::zero()).count()
+    }
+
     pub fn get_powers(&self) -> Powers<E> {
         Powers::<E> {
             powers_of_g: Cow::Borrowed(&self.params.powers_of_g),
