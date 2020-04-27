@@ -160,12 +160,15 @@ impl<E: PairingEngine> LayeredPolyCommit<E> {
         root_of_unity
     }
 
-    // TODO: Avoid [u8] -> E::Fr -> BigInt conversions
-    fn random_bytes_to_evaluation_point(random_bytes: &[u8], modulus: usize) -> Result<usize, Error> {
-        // Note: `from_random_bytes` multiplies the integer representation of the raw bytes by `Fr::R2`
-        let field_element = <E::Fr>::from_random_bytes(random_bytes)?;
+    // TODO: The bulk of the computation time is spent converting bytes into its Montgomery representation.
+    // The evaluation point should be computed using its normal form, and the conversion into Montgomery form
+    // should be done asynchronously.
+    fn bytes_to_evaluation_point(bytes: &[u8], modulus: usize) -> Result<usize, Error> {
+        // Note: `from_random_bytes` converts the integer representation into its Montgomery representation
+        // via Montgomery multiplication with R2.
+        let field_element = <E::Fr>::from_random_bytes(bytes)?;
 
-        // Note: This needs to be an empty vector to behave correctly.
+        // Note: This needs to be an empty vector for correct behavior.
         let mut field_element_bytes = vec!{};
         field_element.write(&mut field_element_bytes)?;
 
@@ -188,7 +191,7 @@ impl<E: PairingEngine> LayeredPolyCommit<E> {
         hasher.input(&[index]);
         hasher.result(&mut digest);
 
-        Ok(Self::random_bytes_to_evaluation_point(&digest, modulus)?)
+        Ok(Self::bytes_to_evaluation_point(&digest, modulus)?)
     }
 
     fn construct_map_value(key: &[u8], value: &[u8]) -> Result<E::Fr, Error> {
@@ -280,7 +283,7 @@ mod tests {
         let num_degrees = 128;
         let input = [0xf; 32];
 
-        let result = LayeredPolyCommitBls12_381::random_bytes_to_evaluation_point(&input, num_degrees);
+        let result = LayeredPolyCommitBls12_381::bytes_to_evaluation_point(&input, num_degrees);
         assert!(result.is_ok());
 
         let point = result.unwrap();
