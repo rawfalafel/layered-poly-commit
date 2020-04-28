@@ -1,5 +1,5 @@
 use poly_commit::error::Error as PolyCommitError;
-use std::io::Error as IOError;
+use algebra_core::io::Error as IOError;
 use std::option::NoneError;
 
 #[derive(Debug)]
