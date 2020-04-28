@@ -1,13 +1,17 @@
 use algebra::Field;
-use algebra_core::bytes::ToBytes;
-use algebra_core::curves::PairingEngine;
-use algebra_core::fields::{FpParameters, PrimeField};
+use algebra_core::{
+    bytes::ToBytes,
+    curves::PairingEngine,
+    fields::{FpParameters,PrimeField}
+};
 use crypto::sha3::Sha3;
 use crypto::digest::Digest;
 use num_bigint::{BigInt,Sign};
 use num_traits::{ToPrimitive,Zero};
-use poly_commit::PCRandomness;
-use poly_commit::kzg10::{KZG10, Randomness, Commitment, Proof};
+use poly_commit::{
+    PCRandomness,
+    kzg10::{KZG10, Randomness, Commitment, Proof}
+};
 use rand_core::RngCore;
 
 use crate::layer::Layer;
@@ -166,7 +170,10 @@ impl<E: PairingEngine> LayeredPolyCommit<E> {
     fn bytes_to_evaluation_point(bytes: &[u8], modulus: usize) -> Result<usize, Error> {
         // Note: `from_random_bytes` converts the integer representation into its Montgomery representation
         // via Montgomery multiplication with R2.
-        let field_element = <E::Fr>::from_random_bytes(bytes)?;
+        let field_element = match <E::Fr>::from_random_bytes(bytes) {
+            Some(field_element) => field_element,
+            None => return Err(Error::BytesNotValidFieldElement)
+        };
 
         // Note: This needs to be an empty vector for correct behavior.
         let mut field_element_bytes = vec!{};
@@ -202,7 +209,10 @@ impl<E: PairingEngine> LayeredPolyCommit<E> {
         hasher.input(value);
         hasher.result(&mut digest);
 
-        Ok(<E::Fr>::from_random_bytes(&digest)?)
+        match <E::Fr>::from_random_bytes(&digest) {
+            Some(field_element) => Ok(field_element),
+            None => Err(Error::BytesNotValidFieldElement)
+        }
     }
 }
 

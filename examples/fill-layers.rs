@@ -1,4 +1,7 @@
-use layered_poly_commit::layered_poly_commit::LayeredPolyCommit;
+use layered_poly_commit::{
+    layered_poly_commit::LayeredPolyCommit,
+    error::Error,
+};
 use algebra::Bls12_381;
 use rand::RngCore;
 use num_traits::pow;
@@ -27,10 +30,7 @@ fn main() {
     let start_time = Instant::now();
 
     for _ in 0..num_total_keys {
-        rng.fill_bytes(&mut key);
-        rng.fill_bytes(&mut value);
-
-        assert!(poly_commit.insert(&key, &value).is_ok());
+        assert!(insert(&mut poly_commit, &mut rng, &mut key, &mut value).is_ok());
     }
 
     println!("fill count by layer");
@@ -48,4 +48,22 @@ fn main() {
     let end_time = Instant::now();
 
     println!("duration: {:?}", end_time - start_time);
+}
+
+fn insert(poly_commit: &mut LayeredPolyCommitBls12_381, rng: &mut Pcg32, key: &mut [u8; 32], value: &mut [u8; 32]) -> Result<(), Error> {
+    rng.fill_bytes(key);
+    rng.fill_bytes(value);
+
+    let result = poly_commit.insert(key, value);
+
+    // `insert` returns `Error::BytesNotValidFieldElement` if the key/value pair
+    // evaluates to a number that's larger than the modulus. Handle this case by
+    // calling `insert` against with a new random key/value pair.
+    match result {
+        Ok(()) => result,
+        Err(error) => match error {
+            Error::BytesNotValidFieldElement => insert(poly_commit, rng, key, value),
+            _ => Err(error)
+        }
+    }
 }

@@ -11,6 +11,7 @@ pub enum Error {
     InvalidProof,
     PolyCommitError(PolyCommitError),
     IOError(IOError),
+    BytesNotValidFieldElement,
     NoneError(NoneError)
 }
 
