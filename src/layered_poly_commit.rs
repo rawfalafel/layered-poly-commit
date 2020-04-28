@@ -1,8 +1,8 @@
 use algebra::Field;
 use algebra_core::{
-    bytes::ToBytes,
     curves::PairingEngine,
-    fields::{FpParameters,PrimeField}
+    fields::{FpParameters,PrimeField},
+    biginteger::BigInteger
 };
 use crypto::sha3::Sha3;
 use crypto::digest::Digest;
@@ -21,7 +21,15 @@ use crate::error::Error;
 pub struct LayeredPolyCommit<E: PairingEngine> {
     pub layers: Vec<Layer<E>>,
     num_degrees: usize,
-    root_of_unity: E::Fr
+    pub precomputes: Precomputes<E>
+}
+
+#[derive(Debug)]
+pub struct Precomputes<E: PairingEngine> {
+    root_of_unity: E::Fr,
+    fr_modulus: BigInt,
+    mask_0: BigInt,
+    mask_1: BigInt
 }
 
 impl<E: PairingEngine> LayeredPolyCommit<E> {
@@ -36,12 +44,33 @@ impl<E: PairingEngine> LayeredPolyCommit<E> {
             Layer::new(params, num_degree)
         }).collect::<Result<Vec<Layer<E>>, Error>>()?;
 
-        let root_of_unity = Self::generate_root_of_unity(num_degree);
-
         Ok(LayeredPolyCommit{
             layers,
             num_degrees: num_degree,
-            root_of_unity: root_of_unity
+            precomputes: Self::generate_precomputes(num_degree)?
+        })
+    }
+
+    fn generate_precomputes(num_degree: usize) -> Result<Precomputes<E>, Error> {
+        let root_of_unity = Self::generate_root_of_unity(num_degree);
+
+        let fr_modulus = <E::Fr as PrimeField>::Params::MODULUS;
+        let mut fr_modulus_bytes = [0u8; 32];
+        // TODO: Why does this look so weird
+        fr_modulus.write_le(&mut &mut fr_modulus_bytes[..])?;
+        let fr_modulus = BigInt::from_bytes_le(Sign::Plus, &fr_modulus_bytes);
+        println!("fr_modulus:\n{:?}", fr_modulus.to_str_radix(10));
+
+        let repr_shave_bits = <E::Fr as PrimeField>::Params::REPR_SHAVE_BITS as usize;
+        let mask = BigInt::from_bytes_le(Sign::Plus, &[0xff; 32]);
+        let mask_0 = &mask >> repr_shave_bits;
+        let mask_1 = &mask >> repr_shave_bits + 1;
+
+        Ok(Precomputes::<E> {
+            root_of_unity,
+            fr_modulus,
+            mask_0,
+            mask_1
         })
     }
 
@@ -49,7 +78,7 @@ impl<E: PairingEngine> LayeredPolyCommit<E> {
     pub fn insert(&mut self, key: &[u8], value: &[u8]) -> Result<(), Error> {
         // Find the first polynomial in which `hash(k, i)` is empty
         for (i, layer) in self.layers.iter_mut().enumerate() {
-            let point = Self::construct_map_key(key, i as u8, self.num_degrees)?;
+            let point = Self::construct_map_key(key, i as u8, &self.precomputes, self.num_degrees)?;
 
             if layer.has_value(point) {
                 continue;
@@ -98,7 +127,7 @@ impl<E: PairingEngine> LayeredPolyCommit<E> {
                 return Err(Error::CommitmentInvalid);
             }
 
-            let point = Self::construct_map_key(key, i as u8, self.num_degrees)?;
+            let point = Self::construct_map_key(key, i as u8, &self.precomputes, self.num_degrees)?;
 
             if layer.evaluations.evals[point] == E::Fr::zero() {
                 continue;
@@ -110,7 +139,7 @@ impl<E: PairingEngine> LayeredPolyCommit<E> {
 
             let powers = layer.get_powers();
             let coefficients = layer.coefficients.as_ref().unwrap();
-            let point = Self::point_to_root_of_unity(self.root_of_unity, point);
+            let point = Self::point_to_root_of_unity(self.precomputes.root_of_unity, point);
             let rand = Randomness::<E>::empty();
 
             return Ok(KZG10::open(&powers, coefficients, point, &rand)?);
@@ -122,7 +151,7 @@ impl<E: PairingEngine> LayeredPolyCommit<E> {
     // Verify that a given witness is valid.
     pub fn verify(&self, key: &[u8], value: &[u8], proof: Proof<E>) -> Result<(), Error> {
         for (i, layer) in self.layers.iter().enumerate() {
-            let point = Self::construct_map_key(key, i as u8, self.num_degrees)?;
+            let point = Self::construct_map_key(key, i as u8, &self.precomputes, self.num_degrees)?;
             if !layer.has_value(point) {
                 continue;
             }
@@ -133,7 +162,7 @@ impl<E: PairingEngine> LayeredPolyCommit<E> {
 
             let vk = layer.get_verifier_key();
             let commitment = layer.commitment.unwrap();
-            let point = Self::point_to_root_of_unity(self.root_of_unity, point);
+            let point = Self::point_to_root_of_unity(self.precomputes.root_of_unity, point);
             let poly_y = Self::construct_map_value(key, value)?;
 
             let valid = KZG10::check(&vk, &commitment, point, poly_y, &proof)?;
@@ -164,22 +193,13 @@ impl<E: PairingEngine> LayeredPolyCommit<E> {
         root_of_unity
     }
 
-    // TODO: The bulk of the computation time is spent converting bytes into its Montgomery representation.
-    // The evaluation point should be computed using its normal form, and the conversion into Montgomery form
-    // should be done asynchronously.
-    fn bytes_to_evaluation_point(bytes: &[u8], modulus: usize) -> Result<usize, Error> {
-        // Note: `from_random_bytes` converts the integer representation into its Montgomery representation
-        // via Montgomery multiplication with R2.
-        let field_element = match <E::Fr>::from_random_bytes(bytes) {
-            Some(field_element) => field_element,
-            None => return Err(Error::BytesNotValidFieldElement)
-        };
+    pub(crate) fn bytes_to_evaluation_point(bytes: &[u8], precomputes: &Precomputes<E>, modulus: usize) -> Result<usize, Error> {
+        let field_element_bigint = BigInt::from_bytes_le(Sign::Plus, bytes);
+        let mut field_element_bigint = field_element_bigint & &precomputes.mask_0;
 
-        // Note: This needs to be an empty vector for correct behavior.
-        let mut field_element_bytes = vec!{};
-        field_element.write(&mut field_element_bytes)?;
-
-        let field_element_bigint = BigInt::from_bytes_le(Sign::Plus, &field_element_bytes);
+        if field_element_bigint > precomputes.fr_modulus {
+            field_element_bigint &= &precomputes.mask_1;
+        }
 
         let point = field_element_bigint % modulus;
 
@@ -190,7 +210,7 @@ impl<E: PairingEngine> LayeredPolyCommit<E> {
         root_of_unity.pow(&[point as u64])
     }
 
-    fn construct_map_key(key: &[u8], index: u8, modulus: usize) -> Result<usize, Error> {
+    fn construct_map_key(key: &[u8], index: u8, precomputes: &Precomputes<E>, modulus: usize) -> Result<usize, Error> {
         let mut hasher = Sha3::sha3_256();
         let mut digest = [0; 32];
 
@@ -198,7 +218,7 @@ impl<E: PairingEngine> LayeredPolyCommit<E> {
         hasher.input(&[index]);
         hasher.result(&mut digest);
 
-        Ok(Self::bytes_to_evaluation_point(&digest, modulus)?)
+        Ok(Self::bytes_to_evaluation_point(&digest, precomputes, modulus)?)
     }
 
     fn construct_map_value(key: &[u8], value: &[u8]) -> Result<E::Fr, Error> {
@@ -291,13 +311,15 @@ mod tests {
     #[test]
     fn test_bytes_to_point() {
         let num_degrees = 128;
-        let input = [0xf; 32];
+        let input = [0xff; 32];
 
-        let result = LayeredPolyCommitBls12_381::bytes_to_evaluation_point(&input, num_degrees);
+        let hashmap = setup(num_degrees, 1).unwrap();
+
+        let result = LayeredPolyCommitBls12_381::bytes_to_evaluation_point(&input, &hashmap.precomputes, num_degrees);
         assert!(result.is_ok());
 
         let point = result.unwrap();
-        assert!(point < 100);
+        assert!(point < num_degrees);
     }
 
     #[test]
