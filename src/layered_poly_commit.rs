@@ -55,11 +55,9 @@ impl<E: PairingEngine> LayeredPolyCommit<E> {
         let root_of_unity = <E::Fr>::get_root_of_unity(num_degree)?;
 
         let fr_modulus = <E::Fr as PrimeField>::Params::MODULUS;
-        let mut fr_modulus_bytes = [0u8; 32];
-        // TODO: Why does this look so weird
-        fr_modulus.write_le(&mut &mut fr_modulus_bytes[..])?;
+        let mut fr_modulus_bytes = vec!{0u8; 32};
+        fr_modulus.write_le(&mut fr_modulus_bytes)?;
         let fr_modulus = BigInt::from_bytes_le(Sign::Plus, &fr_modulus_bytes);
-        println!("fr_modulus:\n{:?}", fr_modulus.to_str_radix(10));
 
         let repr_shave_bits = <E::Fr as PrimeField>::Params::REPR_SHAVE_BITS as usize;
         let mask = BigInt::from_bytes_le(Sign::Plus, &[0xff; 32]);
