@@ -1,7 +1,7 @@
 use algebra::Field;
 use algebra_core::{
     curves::PairingEngine,
-    fields::{FpParameters,PrimeField},
+    fields::{FpParameters,FftField,PrimeField},
     biginteger::BigInteger
 };
 use crypto::sha3::Sha3;
@@ -52,7 +52,7 @@ impl<E: PairingEngine> LayeredPolyCommit<E> {
     }
 
     fn generate_precomputes(num_degree: usize) -> Result<Precomputes<E>, Error> {
-        let root_of_unity = Self::generate_root_of_unity(num_degree);
+        let root_of_unity = <E::Fr>::get_root_of_unity(num_degree)?;
 
         let fr_modulus = <E::Fr as PrimeField>::Params::MODULUS;
         let mut fr_modulus_bytes = [0u8; 32];
@@ -182,17 +182,6 @@ impl<E: PairingEngine> LayeredPolyCommit<E> {
         }
     }
 
-    fn generate_root_of_unity(num_degree: usize) -> E::Fr {
-        let mut root_of_unity = E::Fr::root_of_unity();
-        let log_degree_size = num_degree.trailing_zeros();
-        let two_adicity = <E::Fr as PrimeField>::Params::TWO_ADICITY;
-        for _ in log_degree_size..two_adicity {
-            root_of_unity.square_in_place();
-        }
-
-        root_of_unity
-    }
-
     pub(crate) fn bytes_to_evaluation_point(bytes: &[u8], precomputes: &Precomputes<E>, modulus: usize) -> Result<usize, Error> {
         let field_element_bigint = BigInt::from_bytes_le(Sign::Plus, bytes);
         let mut field_element_bigint = field_element_bigint & &precomputes.mask_0;
@@ -243,10 +232,10 @@ mod tests {
     use algebra::Bls12_381;
     use algebra::bls12_381::Fr;
     use algebra_core::curves::PairingEngine;
-    use algebra_core::fields::{FpParameters, Field, PrimeField};
+    use algebra_core::fields::{FftField, Field};
     use crypto::sha3::Sha3;
     use crypto::digest::Digest;
-    use ff_fft::domain::EvaluationDomain;
+    use ff_fft::domain::{EvaluationDomain,Radix2EvaluationDomain};
     use ff_fft::evaluations::Evaluations;
     use num_traits::pow;
     use num_traits::identities::One;
@@ -380,7 +369,7 @@ mod tests {
         let log_degree_size = 5;
         let num_degrees = pow(2, log_degree_size);
 
-        let domain = EvaluationDomain::<Fr>::new(num_degrees).unwrap();
+        let domain = Radix2EvaluationDomain::<Fr>::new(num_degrees).unwrap();
         let mut evaluations = Evaluations::from_vec_and_domain(vec!{}, domain);
 
         let mut hasher = Sha3::sha3_256();
@@ -389,6 +378,9 @@ mod tests {
         for i in 0..num_degrees {
             hasher.input(&[i as u8]);
             hasher.result(&mut digest);
+
+            // Flip higher bits to avoid generating an invalid (i.e. greater than Fr::MODULUS) bytestring
+            digest[31] &= 0x0f;
             hasher.reset();
 
             let k = Fr::from_random_bytes(&digest).unwrap();
@@ -401,11 +393,7 @@ mod tests {
         // Assert that the evaluation for 0th power of the root of unity is correct.
         assert_eq!(evaluations.evals[0], polynomial.evaluate(Fr::one()));
 
-        let mut root_of_unity = Fr::root_of_unity();
-        let two_adicity = <Fr as PrimeField>::Params::TWO_ADICITY as usize;
-        for _ in log_degree_size..two_adicity {
-            root_of_unity.square_in_place();
-        }
+        let root_of_unity = Fr::get_root_of_unity(num_degrees).unwrap();
 
         // Assert that the evaluation for the root of unity are correct.
         assert_eq!(evaluations.evals[1], polynomial.evaluate(root_of_unity));
