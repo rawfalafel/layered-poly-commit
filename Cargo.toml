@@ -10,7 +10,7 @@ edition = "2018"
 algebra = { git = "https://github.com/scipr-lab/zexe", rev = "4274843a", features = ["full"] }
 algebra-core = { git = "https://github.com/scipr-lab/zexe", rev = "4274843a" }
 ff-fft = { git = "https://github.com/scipr-lab/zexe", rev = "4274843a" }
-poly-commit = { git = "https://github.com/rawfalafel/poly-commit", branch = "layered-poly-commit", rev = "6ff4755" }
+poly-commit = { git = "https://github.com/rawfalafel/poly-commit", rev = "6ff4755" }
 num-bigint = { version = "0.2.6" }
 num-traits = { version = "0.2.11" }
 rand = { version = "0.7.3" }
