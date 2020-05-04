@@ -2,6 +2,8 @@
 
 This repository contains a prototype for [Multi-layer hashmaps using polynomial commitments](https://ethresear.ch/t/multi-layer-hashmaps-for-state-storage/). The prototype largely relies on https://github.com/scipr-lab/poly-commit and https://github.com/scipr-lab/zexe for lower level operations such as generating and opening polynomial commitments. 
 
+**Build note:** This library only supports the _nightly_ Rust compiler.
+
 ## Features
 This hashmap can:
  - Setup a series of parameters corresponding to each layer in the "multi-layer hashmap" scheme. 
